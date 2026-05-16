@@ -35,11 +35,12 @@ app = FastAPI(
 
 # Configure CORS. In production the app is expected to be served same-origin
 # through a reverse proxy, but keeping this configurable preserves local-dev
-# compatibility with the original server.
+# compatibility with the original server. Credentialed CORS cannot be used with
+# a wildcard origin, so credentials are only enabled for explicit origin lists.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CASHIER_CORS_ORIGINS or ["*"],
-    allow_credentials=True,
+    allow_origins=CASHIER_CORS_ORIGINS if CASHIER_CORS_ORIGINS else ["*"],
+    allow_credentials="*" not in CASHIER_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -184,6 +185,8 @@ async def ping():
 @app.get("/health")
 async def health():
     """Return a small health payload suitable for container health checks."""
+    # This endpoint is intentionally lightweight: it reports whether startup
+    # loaded Beancount data, but does not execute a query on every health probe.
     return {
         "ok": True,
         "beancount_file_configured": bool(BEAN_FILE),
