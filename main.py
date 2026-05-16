@@ -6,10 +6,11 @@ FastAPI implementation
 import base64
 import os
 import subprocess
+from pathlib import Path
 from typing import Optional
 import uvicorn
 from loguru import logger
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -18,6 +19,12 @@ load_dotenv()
 BEAN_FILE = os.getenv("BEANCOUNT_FILE")
 CASHIER_SSL_KEY = os.getenv("CASHIER_SSL_KEY")
 CASHIER_SSL_CERT = os.getenv("CASHIER_SSL_CERT")
+CASHIER_ENABLE_SHUTDOWN = os.getenv("CASHIER_ENABLE_SHUTDOWN", "false").lower() in {"1", "true", "yes", "on"}
+CASHIER_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CASHIER_CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 
 # Create a FastAPI instance
 app = FastAPI(
@@ -26,13 +33,15 @@ app = FastAPI(
     version="0.13.0",
 )
 
-# Configure CORS
+# Configure CORS. In production the app is expected to be served same-origin
+# through a reverse proxy, but keeping this configurable preserves local-dev
+# compatibility with the original server.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=CASHIER_CORS_ORIGINS or ["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -171,6 +180,42 @@ async def ping():
     """
     return "pong"
 
+
+@app.get("/health")
+async def health():
+    """Return a small health payload suitable for container health checks."""
+    return {
+        "ok": True,
+        "beancount_file_configured": bool(BEAN_FILE),
+        "beancount_loaded": hasattr(app.state, "connection"),
+    }
+
+
+def resolve_infrastructure_path(file_path: str) -> Path:
+    """Resolve an infrastructure path under the Beancount file directory.
+
+    Cashier PWA asks for files such as config.bean/accounts.bean relative to the
+    Beancount book. Do not allow absolute paths or ../ traversal outside the
+    ledger directory.
+    """
+    if not BEAN_FILE:
+        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
+
+    requested_path = Path(file_path)
+    if requested_path.is_absolute():
+        raise HTTPException(status_code=403, detail="Absolute paths are not allowed")
+
+    ledger_root = Path(BEAN_FILE).resolve().parent
+    resolved_path = (ledger_root / requested_path).resolve()
+
+    try:
+        resolved_path.relative_to(ledger_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Path traversal is not allowed") from exc
+
+    return resolved_path
+
+
 @app.get("/infrastructure")
 async def infrastructure_file(file_path: str):
     """
@@ -183,18 +228,11 @@ async def infrastructure_file(file_path: str):
     Returns:
         The content of the requested file
     """
-    if not BEAN_FILE:
-        raise ValueError("BEAN_FILE environment variable not set")
+    full_file_path = resolve_infrastructure_path(file_path)
+    if not full_file_path.exists() or not full_file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
-    # Get the Beancount directory from BEAN_FILE
-    beancount_dir = os.path.dirname(BEAN_FILE)
-
-    # Construct the full file path
-    full_file_path = os.path.join(beancount_dir, file_path)
-    if not os.path.exists(full_file_path):
-        raise FileNotFoundError(f"File not found: {full_file_path}")
-
-    with open(full_file_path, "r", encoding="utf-8") as f:
+    with full_file_path.open("r", encoding="utf-8") as f:
         content = f.read()
 
     return {"content": content}
@@ -206,6 +244,9 @@ async def shutdown():
     Shutdown the server.
     """
     logger.info("Shutdown requested")
+
+    if not CASHIER_ENABLE_SHUTDOWN:
+        raise HTTPException(status_code=403, detail="Shutdown endpoint is disabled")
 
     if hasattr(app.state, "server"):
         app.state.server.should_exit = True
