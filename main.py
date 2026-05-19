@@ -194,6 +194,23 @@ async def health():
     }
 
 
+def get_ledger_root() -> Path:
+    if not BEAN_FILE:
+        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
+
+    return Path(BEAN_FILE).resolve().parent
+
+
+def reject_unsafe_infrastructure_path(file_path: str) -> Path:
+    requested_path = Path(file_path)
+    if requested_path.is_absolute():
+        raise HTTPException(status_code=403, detail="Absolute paths are not allowed")
+    if ".." in requested_path.parts:
+        raise HTTPException(status_code=403, detail="Path traversal is not allowed")
+
+    return requested_path
+
+
 def resolve_infrastructure_path(file_path: str) -> Path:
     """Resolve an infrastructure path under the Beancount file directory.
 
@@ -201,14 +218,8 @@ def resolve_infrastructure_path(file_path: str) -> Path:
     Beancount book. Do not allow absolute paths or ../ traversal outside the
     ledger directory.
     """
-    if not BEAN_FILE:
-        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
-
-    requested_path = Path(file_path)
-    if requested_path.is_absolute():
-        raise HTTPException(status_code=403, detail="Absolute paths are not allowed")
-
-    ledger_root = Path(BEAN_FILE).resolve().parent
+    requested_path = reject_unsafe_infrastructure_path(file_path)
+    ledger_root = get_ledger_root()
     resolved_path = (ledger_root / requested_path).resolve()
 
     try:
@@ -217,6 +228,42 @@ def resolve_infrastructure_path(file_path: str) -> Path:
         raise HTTPException(status_code=403, detail="Path traversal is not allowed") from exc
 
     return resolved_path
+
+
+def is_glob_path(file_path: str) -> bool:
+    return any(char in file_path for char in "*?[")
+
+
+def read_infrastructure_glob(file_path: str):
+    """Return files matching a safe Beancount workspace glob."""
+    requested_path = reject_unsafe_infrastructure_path(file_path)
+    ledger_root = get_ledger_root()
+    files = []
+
+    try:
+        matched_paths = ledger_root.glob(requested_path.as_posix())
+        for matched_path in matched_paths:
+            if matched_path.is_symlink():
+                continue
+            resolved_path = matched_path.resolve()
+            try:
+                relative_path = resolved_path.relative_to(ledger_root)
+            except ValueError as exc:
+                raise HTTPException(status_code=403, detail="Path traversal is not allowed") from exc
+            if resolved_path.is_file():
+                files.append((relative_path.as_posix(), resolved_path))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid glob pattern: {file_path}") from exc
+
+    if not files:
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    return {
+        "files": [
+            {"path": path, "content": matched_path.read_text(encoding="utf-8")}
+            for path, matched_path in sorted(files)
+        ]
+    }
 
 
 @app.get("/infrastructure")
@@ -231,6 +278,9 @@ async def infrastructure_file(file_path: str):
     Returns:
         The content of the requested file
     """
+    if is_glob_path(file_path):
+        return read_infrastructure_glob(file_path)
+
     full_file_path = resolve_infrastructure_path(file_path)
     if not full_file_path.exists() or not full_file_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
