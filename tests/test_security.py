@@ -52,6 +52,12 @@ def test_infrastructure_rejects_absolute_paths(configured_test_book):
     assert response.status_code == 403
 
 
+def test_infrastructure_rejects_control_characters(configured_test_book):
+    response = client.get("/infrastructure?file_path=config.bean%00.py")
+
+    assert response.status_code == 400
+
+
 def test_infrastructure_rejects_directory_requests(configured_test_book):
     response = client.get("/infrastructure", params={"file_path": "."})
 
@@ -68,6 +74,12 @@ def test_infrastructure_glob_rejects_absolute_paths(configured_test_book):
     response = client.get("/infrastructure", params={"file_path": "/tmp/*.bean"})
 
     assert response.status_code == 403
+
+
+def test_infrastructure_glob_rejects_control_characters(configured_test_book):
+    response = client.get("/infrastructure?file_path=prices%2F*.bean%00")
+
+    assert response.status_code == 400
 
 
 def test_infrastructure_glob_ignores_symlinks(configured_test_book, tmp_path, monkeypatch):

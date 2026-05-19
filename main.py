@@ -202,6 +202,9 @@ def get_ledger_root() -> Path:
 
 
 def reject_unsafe_infrastructure_path(file_path: str) -> Path:
+    if any(ord(char) < 32 for char in file_path):
+        raise HTTPException(status_code=400, detail="Control characters are not allowed")
+
     requested_path = Path(file_path)
     if requested_path.is_absolute():
         raise HTTPException(status_code=403, detail="Absolute paths are not allowed")
