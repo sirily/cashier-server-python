@@ -104,3 +104,45 @@ class TestInfrastructureCommodities:
         result = response.json()
         assert "content" in result
         assert isinstance(result["content"], str)
+
+
+class TestInfrastructureGlob:
+    """Tests for /infrastructure endpoint with glob patterns"""
+
+    def test_glob_prices_bean_returns_all_files_sorted(self):
+        """Test glob pattern prices/*.bean returns matching files in stable order."""
+        response = client.get("/infrastructure", params={"file_path": "prices/*.bean"})
+        assert response.status_code == 200
+        result = response.json()
+        assert result == {
+            "files": [
+                {"path": "prices/2023.bean", "content": "2023 content"},
+                {"path": "prices/2024.bean", "content": "2024 content"},
+            ]
+        }
+
+    def test_glob_only_returns_regular_files(self):
+        """Test glob pattern ignores matching directories."""
+        response = client.get("/infrastructure", params={"file_path": "prices/*"})
+        assert response.status_code == 200
+        result = response.json()
+        assert [item["path"] for item in result["files"]] == [
+            "prices/2023.bean",
+            "prices/2024.bean",
+        ]
+
+    def test_glob_no_match_returns_404(self):
+        """Test glob with no matches returns 404."""
+        response = client.get("/infrastructure", params={"file_path": "prices/*.nonexistent"})
+        assert response.status_code == 404
+        assert "File not found" in response.json()["detail"]
+
+    def test_glob_rejects_absolute_path(self):
+        """Test glob rejects absolute paths."""
+        response = client.get("/infrastructure", params={"file_path": "/etc/*.conf"})
+        assert response.status_code == 403
+
+    def test_glob_rejects_parent_traversal(self):
+        """Test glob rejects parent traversal with double-dot."""
+        response = client.get("/infrastructure", params={"file_path": "../config.bean"})
+        assert response.status_code == 403

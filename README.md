@@ -46,9 +46,8 @@ The server runs on 0.0.0.0:3000, matching the Rust implementation.
 - `/ping` - Simple health check
 - `/reload` - Reload the Beancout data
 - `/shutdown` - Request server shutdown
-- `/infrastructure/config` - Return the Beancount config file content
-- `/infrastructure/accounts` - Return the Beancount accounts file content
-- `/infrastructure/commodities` - Return the Beancount commodities file content
+- `/infrastructure?file_path=config.bean` - Return a Beancount workspace file as `{ "content": "..." }`
+- `/infrastructure?file_path=prices/*.bean` - Return matching Beancount workspace files as `{ "files": [{ "path": "prices/2024.bean", "content": "..." }] }`
 
 CORS is enabled for all origins, similar to the Rust implementation.
 
