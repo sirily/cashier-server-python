@@ -6,6 +6,7 @@ FastAPI implementation
 import base64
 import os
 import subprocess
+from io import StringIO
 from pathlib import Path
 from typing import Optional
 import uvicorn
@@ -233,6 +234,42 @@ def resolve_infrastructure_path(file_path: str) -> Path:
     return resolved_path
 
 
+def is_root_infrastructure_path(full_file_path: Path) -> bool:
+    if not BEAN_FILE:
+        return False
+    return full_file_path.resolve() == Path(BEAN_FILE).resolve()
+
+
+def render_materialized_root_book() -> str:
+    """Load the configured Beancount root and return plugin-applied text.
+
+    The PWA consumes /infrastructure as Beancount text and parses it offline in
+    WASM. Browser WASM cannot execute Python plugin directives, so the server
+    materializes only the configured root file through the normal Python
+    Beancount loader. This preserves the existing endpoint shape while keeping
+    plugin semantics on the server side.
+    """
+    if not BEAN_FILE:
+        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
+
+    from beancount import loader
+    from beancount.parser import printer
+
+    entries, errors, options_map = loader.load_file(BEAN_FILE)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Beancount root book could not be materialized",
+                "errors": [str(error) for error in errors],
+            },
+        )
+
+    output = StringIO()
+    printer.print_entries(entries, dcontext=options_map.get("dcontext"), file=output)
+    return output.getvalue()
+
+
 def is_glob_path(file_path: str) -> bool:
     return any(char in file_path for char in "*?[")
 
@@ -287,6 +324,9 @@ async def infrastructure_file(file_path: str):
     full_file_path = resolve_infrastructure_path(file_path)
     if not full_file_path.exists() or not full_file_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    if is_root_infrastructure_path(full_file_path):
+        return {"content": render_materialized_root_book()}
 
     with full_file_path.open("r", encoding="utf-8") as f:
         content = f.read()

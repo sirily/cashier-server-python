@@ -27,6 +27,37 @@ def set_bean_file():
     # Cleanup (optional)
 
 
+class TestInfrastructureRoot:
+    """Tests for /infrastructure root book materialization."""
+
+    def test_infrastructure_root_returns_materialized_content(self):
+        """Root book response keeps {content} shape but applies Python plugins server-side."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_root.bean")
+        main.BEAN_FILE = test_bean_file
+
+        response = client.get("/infrastructure", params={"file_path": "materialized_root.bean"})
+
+        assert response.status_code == 200
+        result = response.json()
+        assert set(result.keys()) == {"content"}
+        assert 'plugin "beancount.plugins.implicit_prices"' not in result["content"]
+        assert 'include "' not in result["content"]
+        assert 'Assets:Cash               10 USD' in result["content"]
+        assert 'Equity:Opening-Balances  -10 USD' in result["content"]
+
+    def test_infrastructure_root_materialization_reports_loader_errors(self):
+        """Invalid root materialization returns a controlled error instead of raw source."""
+        test_bean_file = os.path.join(TEST_DIR, "book.bean")
+        main.BEAN_FILE = test_bean_file
+
+        response = client.get("/infrastructure", params={"file_path": "book.bean"})
+
+        assert response.status_code == 422
+        result = response.json()
+        assert result["detail"]["message"] == "Beancount root book could not be materialized"
+        assert result["detail"]["errors"]
+
+
 class TestInfrastructureConfig:
     """Tests for /infrastructure endpoint with config.bean"""
 
