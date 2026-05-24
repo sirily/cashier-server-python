@@ -5,6 +5,9 @@ Test infrastructure endpoints
 import os
 import pytest
 import main
+from beancount import loader
+from beancount.core import data
+from beancount.parser import parser
 from fastapi.testclient import TestClient
 
 
@@ -57,9 +60,108 @@ class TestInfrastructureRoot:
         assert result["detail"]["message"] == "Beancount root book could not be materialized"
         assert result["detail"]["errors"]
 
+    def test_materialized_printer_preserves_all_entries_with_programmatic_metadata(self):
+        """Programmatic metadata must not make materialized export drop entries.
 
-class TestInfrastructureConfig:
-    """Tests for /infrastructure endpoint with config.bean"""
+        Lazy-beancount plugins can create parser-valid entries whose metadata
+        contains plain Python values that Beancount's strict convenience printer
+        refuses. The materialized export must still serialize every entry.
+        """
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entries = [entry._replace(meta={**entry.meta, "generated_index": 2}) for entry in entries]
+
+        content = main.print_materialized_entries(entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert len(reparsed_entries) == len(entries)
+        assert '2024-01-01 custom "valuation" "Assets:Broker:Total" 7500.0 USD' in content
+        assert "generated_index: 2" in content
+
+    def test_infrastructure_root_preserves_custom_amount_entry(self):
+        """Root materialization keeps Custom entries and Amount values importable."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        main.BEAN_FILE = test_bean_file
+
+        response = client.get("/infrastructure", params={"file_path": "materialized_custom_root.bean"})
+
+        assert response.status_code == 200
+        content = response.json()["content"]
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+        assert not reparsed_errors
+        assert any(type(entry).__name__ == "Custom" for entry in reparsed_entries)
+        assert '2024-01-01 custom "valuation" "Assets:Broker:Total" 7500.0 USD' in content
+
+    def test_canonicalization_preserves_programmatic_private_metadata_as_textual_metadata(self):
+        """Programmatic metadata keys invalid in textual Beancount are renamed, not dropped."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entries = [entry._replace(meta={**entry.meta, "_timesApplied": 2}) for entry in entries]
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert len(reparsed_entries) == len(entries)
+        assert not any(line.strip().startswith("_timesApplied:") for line in content.splitlines())
+        assert "pwa_timesApplied: 2" in content
+        assert any(entry.meta.get("pwa_timesApplied") == 2 for entry in reparsed_entries)
+        assert '2024-01-01 custom "valuation" "Assets:Broker:Total" 7500.0 USD' in content
+
+    def test_canonicalization_removes_only_consumed_pad_directive(self):
+        """A consumed Pad instruction is not exported as an active second-pass operation.
+
+        This fixture represents the post-plugin state: both the operational Pad
+        directive and its concrete inserted transaction are present. Removing the
+        Pad is safe only if the transaction, its postings, and the balance check
+        remain in the PWA snapshot.
+        """
+        fixture_path = os.path.join(TEST_DIR, "materialized_pad_snapshot.bean")
+        entries, errors, options_map = parser.parse_file(fixture_path)
+        assert not errors
+        assert sum(isinstance(entry, data.Pad) for entry in entries) == 1
+        expected_transactions = [entry for entry in entries if isinstance(entry, data.Transaction)]
+        expected_balances = [entry for entry in entries if isinstance(entry, data.Balance)]
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert not any(isinstance(entry, data.Pad) for entry in canonical_entries)
+        assert not any(isinstance(entry, data.Pad) for entry in reparsed_entries)
+        actual_transactions = [entry for entry in reparsed_entries if isinstance(entry, data.Transaction)]
+        actual_balances = [entry for entry in reparsed_entries if isinstance(entry, data.Balance)]
+        assert len(actual_transactions) == len(expected_transactions) == 1
+        assert len(actual_balances) == len(expected_balances) == 1
+        assert [(posting.account, posting.units) for posting in actual_transactions[0].postings] == [
+            (posting.account, posting.units) for posting in expected_transactions[0].postings
+        ]
+        assert (actual_balances[0].account, actual_balances[0].amount) == (
+            expected_balances[0].account,
+            expected_balances[0].amount,
+        )
+
+    def test_canonicalization_keeps_every_non_pad_entry(self):
+        """Canonicalization may consume Pad instructions, not unrelated entries."""
+        fixture_path = os.path.join(TEST_DIR, "materialized_pad_snapshot.bean")
+        entries, errors, _ = parser.parse_file(fixture_path)
+        assert not errors
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
+
+        assert [entry for entry in canonical_entries] == [
+            entry for entry in entries if not isinstance(entry, data.Pad)
+        ]
+        assert len(entries) - len(canonical_entries) == sum(isinstance(entry, data.Pad) for entry in entries)
+
+
+class TestInfrastructure:
+
 
     def test_infrastructure_config_returns_config_file(self):
         """Test that infrastructure endpoint returns the config.bean file content."""

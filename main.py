@@ -14,6 +14,7 @@ from loguru import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from beancount.core import data
 
 
 load_dotenv()
@@ -240,6 +241,95 @@ def is_root_infrastructure_path(full_file_path: Path) -> bool:
     return full_file_path.resolve() == Path(BEAN_FILE).resolve()
 
 
+def pwa_metadata_key(key: str, existing_keys: set[str]) -> str:
+    """Return a textual-Beancount-compatible metadata key for PWA export."""
+    if not key.startswith("_"):
+        return key
+
+    base = f"pwa_{key.lstrip('_') or 'metadata'}"
+    candidate = base
+    suffix = 2
+    while candidate in existing_keys:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def canonicalize_metadata_for_pwa(meta: dict) -> dict:
+    """Preserve metadata values while making programmatic keys printable/parseable."""
+    canonical_meta = {}
+    for key, value in meta.items():
+        canonical_key = pwa_metadata_key(key, set(canonical_meta.keys()))
+        canonical_meta[canonical_key] = value
+    return canonical_meta
+
+
+def canonicalize_entry_metadata_for_pwa(entry):
+    """Canonicalize metadata on an entry and, for transactions, its postings."""
+    canonical_entry = entry._replace(meta=canonicalize_metadata_for_pwa(entry.meta))
+    if isinstance(canonical_entry, data.Transaction):
+        canonical_postings = [
+            posting._replace(meta=canonicalize_metadata_for_pwa(posting.meta or {}))
+            for posting in canonical_entry.postings
+        ]
+        canonical_entry = canonical_entry._replace(postings=canonical_postings)
+    return canonical_entry
+
+
+def canonicalize_materialized_entries_for_pwa(entries: list) -> list:
+    """Return the post-plugin snapshot suitable for a second, offline parse.
+
+    Python Beancount leaves Pad directives in the plugin-applied entry stream
+    alongside the concrete padding transactions produced by ``beancount.ops.pad``.
+    Cashier's offline parser treats a Pad directive as an instruction to execute
+    or validate, so exporting both forms asks it to process an operation that the
+    server has already completed. Preserve every semantic result entry and omit
+    only those consumed operational Pad directives from the PWA snapshot.
+
+    Plugin code can also attach programmatic metadata keys that are valid Python
+    dictionary keys but invalid textual Beancount keys (for example names starting
+    with ``_``). Rename those keys in the PWA export while preserving their
+    values, entries, postings, and balances.
+
+    This runs only after ``loader.load_file`` has returned without errors; an
+    invalid source book is never made exportable by canonicalization.
+    """
+    return [
+        canonicalize_entry_metadata_for_pwa(entry)
+        for entry in entries
+        if not isinstance(entry, data.Pad)
+    ]
+
+
+def print_materialized_entries(entries: list, options_map: dict) -> str:
+    """Serialize every materialized Beancount entry to parseable text.
+
+    Beancount's convenience printer uses a strict EntryPrinter by default. Real
+    plugin-applied ledgers can attach parser-valid metadata values that the
+    strict printer refuses if they were produced programmatically (for example
+    lazy-beancount valuation metadata containing a plain int). Use the same
+    printer, but enable its explicit stringify_invalid_types mode so we do not
+    drop entries or metadata just to get a printable export.
+    """
+    from beancount.parser import printer
+
+    output = StringIO()
+    eprinter = printer.EntryPrinter(
+        dcontext=options_map.get("dcontext"),
+        stringify_invalid_types=True,
+    )
+    previous_type = type(entries[0]) if entries else None
+
+    for entry in entries:
+        entry_type = type(entry)
+        if entry_type in (printer.data.Transaction, printer.data.Commodity) or entry_type is not previous_type:
+            output.write("\n")
+            previous_type = entry_type
+        output.write(eprinter(entry))
+
+    return output.getvalue()
+
+
 def render_materialized_root_book() -> str:
     """Load the configured Beancount root and return plugin-applied text.
 
@@ -253,7 +343,6 @@ def render_materialized_root_book() -> str:
         raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
 
     from beancount import loader
-    from beancount.parser import printer
 
     entries, errors, options_map = loader.load_file(BEAN_FILE)
     if errors:
@@ -265,9 +354,8 @@ def render_materialized_root_book() -> str:
             },
         )
 
-    output = StringIO()
-    printer.print_entries(entries, dcontext=options_map.get("dcontext"), file=output)
-    return output.getvalue()
+    snapshot_entries = canonicalize_materialized_entries_for_pwa(entries)
+    return print_materialized_entries(snapshot_entries, options_map)
 
 
 def is_glob_path(file_path: str) -> bool:
