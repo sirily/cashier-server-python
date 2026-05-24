@@ -4,9 +4,12 @@ FastAPI implementation
 """
 
 import base64
+import datetime
+import enum
 import os
 import re
 import subprocess
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from typing import Optional
@@ -15,7 +18,7 @@ from loguru import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from beancount.core import data
+from beancount.core import amount, data, inventory
 
 
 load_dotenv()
@@ -268,12 +271,29 @@ def pwa_metadata_key(key: str, existing_keys: set[str]) -> str:
     return candidate
 
 
+def canonicalize_metadata_value_for_pwa(value):
+    """Return a metadata value that Beancount's text parser can read back.
+
+    Beancount's printer can stringify arbitrary Python objects when asked, but
+    those bare strings are not necessarily valid textual metadata values. Keep
+    parser-native metadata value types unchanged; turn everything else into a
+    quoted string by returning ``str(value)``.
+    """
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, (str, Decimal, int, float, datetime.date, amount.Amount, bool)) or value is None:
+        return value
+    if isinstance(value, (dict, inventory.Inventory)):
+        return str(value)
+    return str(value)
+
+
 def canonicalize_metadata_for_pwa(meta: dict) -> dict:
-    """Preserve metadata values while making programmatic keys printable/parseable."""
+    """Preserve metadata while making keys and values printable/parseable."""
     canonical_meta = {}
     for key, value in meta.items():
         canonical_key = pwa_metadata_key(key, set(canonical_meta.keys()))
-        canonical_meta[canonical_key] = value
+        canonical_meta[canonical_key] = canonicalize_metadata_value_for_pwa(value)
     return canonical_meta
 
 
@@ -299,10 +319,11 @@ def canonicalize_materialized_entries_for_pwa(entries: list) -> list:
     server has already completed. Preserve every semantic result entry and omit
     only those consumed operational Pad directives from the PWA snapshot.
 
-    Plugin code can also attach programmatic metadata keys that are valid Python
-    dictionary keys but invalid textual Beancount keys (for example names starting
-    with ``_``). Rename those keys in the PWA export while preserving their
-    values, entries, postings, and balances.
+    Plugin code can also attach programmatic metadata keys/values that are valid
+    Python objects but invalid textual Beancount metadata (for example names
+    starting with ``_`` or tuple values). Rename those keys and stringify
+    non-native values in the PWA export while preserving entries, postings, and
+    balances.
 
     This runs only after ``loader.load_file`` has returned without errors; an
     invalid source book is never made exportable by canonicalization.

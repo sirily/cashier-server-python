@@ -2,13 +2,26 @@
 Test infrastructure endpoints
 '''
 
+import datetime
+import enum
 import os
+from decimal import Decimal
+
 import pytest
 import main
 from beancount import loader
-from beancount.core import data
+from beancount.core import amount, data, inventory
 from beancount.parser import parser
 from fastapi.testclient import TestClient
+
+
+class MetadataEnum(enum.Enum):
+    VALUE = "VALUE"
+
+
+class ReprValue:
+    def __str__(self):
+        return "<repr value>"
 
 
 client = TestClient(main.app)
@@ -153,6 +166,66 @@ class TestInfrastructureRoot:
             assert reparsed_entries[0].meta[key] == value
         for invalid_key in ("_timesApplied", "_bad-key!", "Foo", "1foo", "foo.bar", "foo/bar", "foo bar", "éfoo"):
             assert not any(line.strip().startswith(f"{invalid_key}:") for line in content.splitlines())
+
+    def test_canonicalization_makes_programmatic_metadata_values_parseable(self):
+        """Unsupported Python metadata values are exported as quoted strings."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entry = entries[0]._replace(
+            meta={
+                **entries[0].meta,
+                "string_value": "kept",
+                "decimal_value": Decimal("1.23"),
+                "date_value": datetime.date(2024, 1, 2),
+                "amount_value": amount.Amount(Decimal("3.45"), "USD"),
+                "enum_value": MetadataEnum.VALUE,
+                "bool_value": True,
+                "none_value": None,
+                "tuple_value": (1, 2),
+                "list_value": [1, 2],
+                "set_value": {1, 2},
+                "dict_value": {"a": 1},
+                "inventory_value": inventory.Inventory(),
+                "object_value": ReprValue(),
+            }
+        )
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        reparsed_meta = reparsed_entries[0].meta
+        assert reparsed_meta["string_value"] == "kept"
+        assert reparsed_meta["decimal_value"] == Decimal("1.23")
+        assert reparsed_meta["date_value"] == datetime.date(2024, 1, 2)
+        assert reparsed_meta["amount_value"] == amount.Amount(Decimal("3.45"), "USD")
+        assert reparsed_meta["enum_value"] == MetadataEnum.VALUE.value
+        assert reparsed_meta["bool_value"] is True
+        assert reparsed_meta["none_value"] is None
+        assert reparsed_meta["tuple_value"] == "(1, 2)"
+        assert reparsed_meta["list_value"] == "[1, 2]"
+        assert reparsed_meta["set_value"] in {"{1, 2}", "{2, 1}"}
+        assert reparsed_meta["dict_value"] == "{'a': 1}"
+        assert reparsed_meta["inventory_value"] == "()"
+        assert reparsed_meta["object_value"] == "<repr value>"
+
+    def test_canonicalized_snapshot_reparses_after_key_and_value_normalization(self):
+        """The combined PWA export contract is a parseable materialized snapshot."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entry = entries[0]._replace(meta={**entries[0].meta, "_tuple": (1, 2), "bad/key": ReprValue()})
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert len(reparsed_entries) == len(canonical_entries)
+        assert reparsed_entries[0].meta["pwa_tuple"] == "(1, 2)"
+        assert reparsed_entries[0].meta["pwa_bad_key"] == "<repr value>"
 
     def test_canonicalization_preserves_colliding_metadata_values(self):
         """Renamed metadata never overwrites an existing valid key on the same entry."""
