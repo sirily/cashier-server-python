@@ -5,6 +5,7 @@ FastAPI implementation
 
 import base64
 import os
+import re
 import subprocess
 from io import StringIO
 from pathlib import Path
@@ -241,12 +242,24 @@ def is_root_infrastructure_path(full_file_path: Path) -> bool:
     return full_file_path.resolve() == Path(BEAN_FILE).resolve()
 
 
+TEXTUAL_METADATA_KEY_RE = re.compile(r"^[a-z][A-Za-z0-9_-]*$")
+
+
 def pwa_metadata_key(key: str, existing_keys: set[str]) -> str:
-    """Return a textual-Beancount-compatible metadata key for PWA export."""
-    if not key.startswith("_"):
+    """Return a textual-Beancount-compatible metadata key for PWA export.
+
+    Python plugins can attach metadata using arbitrary Python dictionary keys,
+    but textual Beancount accepts only lower-case-leading metadata keys made from
+    letters, digits, underscores, and hyphens. Keep already-valid public keys as
+    they are; rename export-incompatible keys into a stable ``pwa_`` namespace
+    and avoid collisions with keys already present on the same entry/posting.
+    """
+    if TEXTUAL_METADATA_KEY_RE.match(key) and not key.startswith("_"):
         return key
 
-    base = f"pwa_{key.lstrip('_') or 'metadata'}"
+    safe_suffix = re.sub(r"[^A-Za-z0-9_-]", "_", key.lstrip("_"))
+    safe_suffix = re.sub(r"^[^A-Za-z]+", "", safe_suffix) or "metadata"
+    base = f"pwa_{safe_suffix}"
     candidate = base
     suffix = 2
     while candidate in existing_keys:

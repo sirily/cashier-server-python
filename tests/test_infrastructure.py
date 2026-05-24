@@ -112,6 +112,82 @@ class TestInfrastructureRoot:
         assert any(entry.meta.get("pwa_timesApplied") == 2 for entry in reparsed_entries)
         assert '2024-01-01 custom "valuation" "Assets:Broker:Total" 7500.0 USD' in content
 
+    def test_canonicalization_makes_all_programmatic_metadata_keys_parseable(self):
+        """Invalid Python-only metadata key names become parseable PWA export names."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entry = entries[0]._replace(
+            meta={
+                **entries[0].meta,
+                "valid_key": "kept",
+                "_timesApplied": 2,
+                "_bad-key!": 3,
+                "Foo": 4,
+                "1foo": 5,
+                "foo.bar": 6,
+                "foo/bar": 7,
+                "foo bar": 8,
+                "éfoo": 9,
+            }
+        )
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert reparsed_entries[0].meta["valid_key"] == "kept"
+        expected_metadata = {
+            "pwa_timesApplied": 2,
+            "pwa_bad-key_": 3,
+            "pwa_Foo": 4,
+            "pwa_foo": 5,
+            "pwa_foo_bar": 6,
+            "pwa_foo_bar_2": 7,
+            "pwa_foo_bar_3": 8,
+            "pwa_foo_2": 9,
+        }
+        for key, value in expected_metadata.items():
+            assert f"{key}:" in content
+            assert reparsed_entries[0].meta[key] == value
+        for invalid_key in ("_timesApplied", "_bad-key!", "Foo", "1foo", "foo.bar", "foo/bar", "foo bar", "éfoo"):
+            assert not any(line.strip().startswith(f"{invalid_key}:") for line in content.splitlines())
+
+    def test_canonicalization_preserves_colliding_metadata_values(self):
+        """Renamed metadata never overwrites an existing valid key on the same entry."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entry = entries[0]._replace(meta={**entries[0].meta, "pwa_foo": "original", "_foo": "renamed"})
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert reparsed_entries[0].meta["pwa_foo"] == "original"
+        assert reparsed_entries[0].meta["pwa_foo_2"] == "renamed"
+
+    def test_canonicalization_covers_posting_metadata(self):
+        """Posting metadata gets the same parseable-key treatment as entry metadata."""
+        entries, errors, options_map = parser.parse_string(
+            '''2024-01-01 * "Posting metadata"\n  Assets:Cash  1 USD\n  Equity:Opening-Balances -1 USD\n'''
+        )
+        assert not errors
+        posting = entries[0].postings[0]._replace(meta={"pwa_post": "original", "_post": "renamed", "foo.bar": 3})
+        entry = entries[0]._replace(postings=[posting, entries[0].postings[1]])
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        reparsed_posting_meta = reparsed_entries[0].postings[0].meta
+        assert reparsed_posting_meta["pwa_post"] == "original"
+        assert reparsed_posting_meta["pwa_post_2"] == "renamed"
+        assert reparsed_posting_meta["pwa_foo_bar"] == 3
+
     def test_canonicalization_removes_only_consumed_pad_directive(self):
         """A consumed Pad instruction is not exported as an active second-pass operation.
 
