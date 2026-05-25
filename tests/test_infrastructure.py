@@ -124,6 +124,29 @@ class TestInfrastructureRoot:
         assert '"Unit FX price remains unit price"' in content
         assert "Assets:MyFavouriteBank:Cash -10 GBP @ 1.23 USD" in content
 
+    def test_infrastructure_root_rejects_scoped_source_directive_until_preservation_is_implemented(
+        self, tmp_path
+    ):
+        """Fail closed for scoped directives whose order would affect source semantics."""
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:Cash USD\n"
+            "2024-01-01 open Income:Salary USD\n\n"
+            "pushtag #taxable\n"
+            '2024-01-02 * "Salary"\n'
+            "  Assets:Cash 1 USD\n"
+            "  Income:Salary -1 USD\n"
+            "poptag #taxable\n",
+            encoding="utf-8",
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "Unsupported non-entry source directive" in response.json()["detail"]["errors"][0]
+
     def test_infrastructure_root_rejects_plugin_without_export_policy(self, tmp_path):
         """Standalone export must not execute an unreviewed Python plugin."""
         test_bean_file = tmp_path / "main.bean"
@@ -158,6 +181,39 @@ class TestInfrastructureRoot:
         entries, errors, options_map = parser.parse_file(str(test_bean_file))
         assert not errors
         entries[-1] = entries[-1]._replace(narration="Plugin-modified FX")
+        monkeypatch.setattr(
+            snapshot_builder.loader,
+            "load_file",
+            lambda _: (entries, [], options_map),
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "cannot safely export transformed source directive" in (
+            response.json()["detail"]["errors"][0]
+        )
+
+    def test_infrastructure_root_rejects_transformed_exact_total_cost_source(
+        self, tmp_path, monkeypatch
+    ):
+        """A transformed total-cost source must not lose exact ``{{ ... }}`` syntax."""
+        from cashier_snapshot import builder as snapshot_builder
+
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:Holding HOOL\n"
+            "2024-01-01 open Assets:Cash USD\n\n"
+            '2024-01-03 * "Cost"\n'
+            "  Assets:Holding 3 HOOL {{ 100.00 USD }}\n"
+            "  Assets:Cash -100.00 USD\n",
+            encoding="utf-8",
+        )
+        entries, errors, options_map = parser.parse_file(str(test_bean_file))
+        assert not errors
+        entries[-1] = entries[-1]._replace(narration="Plugin-modified total cost")
         monkeypatch.setattr(
             snapshot_builder.loader,
             "load_file",

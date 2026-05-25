@@ -11,7 +11,7 @@ from .errors import SnapshotBuildError
 from .source_index import SourceBlock
 
 
-PRICE_SYNTAX_RE = re.compile(r"\s@@?\s")
+LOSSY_SOURCE_SYNTAX_RE = re.compile(r"(?:\s@@?\s|\{\{|\{[^\n}]*#)")
 
 
 def _public_metadata(meta: dict | None) -> dict:
@@ -68,8 +68,14 @@ def _source_entry_is_retained(source_entry, final_entry) -> bool:
 
 
 def _safe_printable_transform(source_block: SourceBlock, final_entry) -> bool:
-    """Print transformations only when no erased source price syntax exists."""
-    if PRICE_SYNTAX_RE.search(source_block.text):
+    """Print transformations only when no erased source price/cost syntax exists.
+
+    Python Beancount normalizes total-price (``@@``) and total-cost forms
+    (``{{ ... }}`` / ``{ ... # ... }``) when it parses source. Reprinting a
+    plugin-transformed directive from the parsed object may therefore alter its
+    exact accounting meaning, so those forms remain fail-closed.
+    """
+    if LOSSY_SOURCE_SYNTAX_RE.search(source_block.text):
         return False
     return type(source_block.entry) is type(final_entry)
 
