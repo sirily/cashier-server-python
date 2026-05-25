@@ -1,0 +1,3 @@
+option "title" "Materialized Custom Root Test"
+
+2024-01-01 custom "valuation" "Assets:Broker:Total" 7500.0 USD

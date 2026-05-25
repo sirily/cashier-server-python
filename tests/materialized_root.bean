@@ -1,0 +1,9 @@
+option "title" "Materialized Root Test"
+plugin "beancount.plugins.implicit_prices"
+
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Equity:Opening-Balances USD
+
+2024-01-02 * "Opening"
+  Assets:Cash  10 USD
+  Equity:Opening-Balances
