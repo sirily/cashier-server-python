@@ -240,9 +240,12 @@ Parse errors                                 0
 
 После этого повторить проверку локальной offline transaction persistence и реального multi-currency dashboard/vendor flow.
 
-## 10. Разбиение будущей реализации на PR
+## 10. Реализация и выпуск
 
-Эта документационная ветка не реализует поведение. Для кода рекомендуется последовательность:
+В текущей ветке объединены этапы A-C: добавлена rounded-FX регрессия,
+реализованы source index, policy-driven reconciliation и standalone builder,
+а root endpoint переключён на новый вывод. Docker/RustLedger boundary test
+является обязательным барьером перед merge.
 
 ### PR A: красная регрессия и аудит
 
@@ -261,7 +264,7 @@ Parse errors                                 0
 - Переключить root endpoint на новую выдачу.
 - Сделать Docker/RustLedger rounded-FX gate зелёным.
 
-### PR D: deploy и production verification
+### Следующий этап: deploy и production verification
 
 - Развернуть серверный образ.
 - Выполнить полный `/sync` QA и задокументировать результат.

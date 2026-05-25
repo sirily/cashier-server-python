@@ -52,4 +52,4 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 # Include the package subfolder in the distribution package.
 #packages = ["pricedl"]
-only-include = ["main.py"]
+only-include = ["main.py", "cashier_snapshot"]

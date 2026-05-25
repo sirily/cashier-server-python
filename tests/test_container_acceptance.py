@@ -153,6 +153,10 @@ class TestContainerAcceptance:
         assert "Assets:MyAutomaticBroker:Total" in content
         assert "Assets:MyFavouriteBank:Cash" in content
         assert "Equity:RegularTransacionForSummariesFrom" in content
+        assert '"Rounded FX exact total"' in content
+        assert "Assets:MyFavouriteBank:Cash -1000 GBP @@ 1234.56 USD" in content
+        assert '"Unit FX price remains unit price"' in content
+        assert "Assets:MyFavouriteBank:Cash -10 GBP @ 1.23 USD" in content
 
     def test_infrastructure_includes_supporting_files(self):
         status, body = _get("/infrastructure", params={"file_path": "accounts.bean"})

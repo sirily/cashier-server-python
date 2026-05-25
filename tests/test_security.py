@@ -145,6 +145,28 @@ def test_infrastructure_symlink_to_outside_does_not_exfiltrate(configured_test_b
     assert [item["path"] for item in glob_response.json()["files"]] == ["book.bean"]
 
 
+def test_infrastructure_root_rejects_symlink_include_before_materialization(
+    configured_test_book, tmp_path, monkeypatch
+):
+    """A root snapshot cannot follow an included symlink out of its workspace."""
+    root = tmp_path / "ledger"
+    root.mkdir()
+    outside_secret = tmp_path / "secret.bean"
+    outside_secret.write_text(
+        '; SECRET_OUTSIDE_WORKSPACE\n2024-01-01 open Assets:Cash USD\n',
+        encoding="utf-8",
+    )
+    (root / "linked.bean").symlink_to(outside_secret)
+    (root / "main.bean").write_text('include "linked.bean"\n', encoding="utf-8")
+    monkeypatch.setattr(main, "BEAN_FILE", str(root / "main.bean"))
+
+    response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+    assert response.status_code == 422
+    assert "Symlink source include is not exportable" in response.text
+    assert "SECRET_OUTSIDE_WORKSPACE" not in response.text
+
+
 def test_infrastructure_file_path_is_not_executed_as_shell(configured_test_book, tmp_path):
     """Shell metacharacters in file_path must be inert path text, not commands."""
     marker = tmp_path / "rce-marker"

@@ -1,6 +1,6 @@
 # Проект: автономный `main.bean` для Cashier PWA без потери семантики исходной книги
 
-- Статус: проектное решение для последующей реализации
+- Статус: реализовано в текущей ветке; подтверждено Docker/RustLedger acceptance
 - Область изменений: `cashier-server-python`
 - Целевой endpoint: `GET /infrastructure?file_path=main.bean`
 - Потребитель результата: Cashier PWA через `@rustledger/wasm@0.14.1`

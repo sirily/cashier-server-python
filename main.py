@@ -369,32 +369,55 @@ def print_materialized_entries(entries: list, options_map: dict) -> str:
     return output.getvalue()
 
 
+def print_generated_entries_for_pwa(entries: list, options_map: dict) -> str:
+    """Print plugin-generated entries after normalizing Python-only metadata."""
+    canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
+    return print_materialized_entries(canonical_entries, options_map)
+
+
 def render_materialized_root_book() -> str:
-    """Load the configured Beancount root and return plugin-applied text.
+    """Build a standalone source-preserving root ledger for the PWA.
 
     The PWA consumes /infrastructure as Beancount text and parses it offline in
-    WASM. Browser WASM cannot execute Python plugin directives, so the server
-    materializes only the configured root file through the normal Python
-    Beancount loader. This preserves the existing endpoint shape while keeping
-    plugin semantics on the server side.
+    WASM. Browser WASM cannot execute Python plugin directives, while reprinting
+    user transactions after Beancount parsing loses exact price notation such as
+    ``@@``. The standalone builder therefore retains proven-unchanged source
+    blocks verbatim and prints only generated materialized entries.
     """
     if not BEAN_FILE:
         raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
 
-    from beancount import loader
+    from cashier_snapshot import SnapshotBuildError, StandaloneSnapshotBuilder
 
-    entries, errors, options_map = loader.load_file(BEAN_FILE)
-    if errors:
+    try:
+        content, stats = StandaloneSnapshotBuilder(
+            Path(BEAN_FILE),
+            print_generated_entries_for_pwa,
+        ).build()
+    except SnapshotBuildError as exc:
+        error = str(exc)
+        message = "Standalone PWA snapshot could not be built"
+        if error.startswith("Beancount root book could not be materialized:"):
+            message = "Beancount root book could not be materialized"
         raise HTTPException(
             status_code=422,
             detail={
-                "message": "Beancount root book could not be materialized",
-                "errors": [str(error) for error in errors],
+                "message": message,
+                "errors": [error],
             },
-        )
+        ) from exc
 
-    snapshot_entries = canonicalize_materialized_entries_for_pwa(entries)
-    return print_materialized_entries(snapshot_entries, options_map)
+    logger.info(
+        "Built standalone PWA snapshot: retained={}, omitted_infrastructure={}, "
+        "consumed_operational={}, generated={}, transformed={}, bytes={}",
+        stats.retained,
+        stats.omitted_infrastructure,
+        stats.consumed_operational,
+        stats.generated,
+        stats.transformed,
+        len(content.encode("utf-8")),
+    )
+    return content
 
 
 def is_glob_path(file_path: str) -> bool:
