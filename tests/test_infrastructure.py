@@ -9,6 +9,10 @@ from decimal import Decimal
 
 import pytest
 import main
+from cashier_snapshot.printer import (
+    canonicalize_materialized_entries_for_pwa,
+    print_materialized_entries,
+)
 from beancount import loader
 from beancount.core import amount, data, inventory
 from beancount.parser import parser
@@ -85,7 +89,7 @@ class TestInfrastructureRoot:
         assert not errors
         entries = [entry._replace(meta={**entry.meta, "generated_index": 2}) for entry in entries]
 
-        content = main.print_materialized_entries(entries, options_map)
+        content = print_materialized_entries(entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -175,8 +179,8 @@ class TestInfrastructureRoot:
         assert not errors
         entries = [entry._replace(meta={**entry.meta, "_timesApplied": 2}) for entry in entries]
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -206,8 +210,8 @@ class TestInfrastructureRoot:
             }
         )
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -252,8 +256,8 @@ class TestInfrastructureRoot:
             }
         )
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -279,8 +283,8 @@ class TestInfrastructureRoot:
         assert not errors
         entry = entries[0]._replace(meta={**entries[0].meta, "_tuple": (1, 2), "bad/key": ReprValue()})
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -295,8 +299,8 @@ class TestInfrastructureRoot:
         assert not errors
         entry = entries[0]._replace(meta={**entries[0].meta, "pwa_foo": "original", "_foo": "renamed"})
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -310,8 +314,8 @@ class TestInfrastructureRoot:
         assert not errors
         entry = entries[0]._replace(meta={**entries[0].meta, "_foo": "renamed", "pwa_foo": "original"})
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -327,8 +331,8 @@ class TestInfrastructureRoot:
         posting = entries[0].postings[0]._replace(meta={"pwa_post": "original", "_post": "renamed", "foo.bar": 3})
         entry = entries[0]._replace(postings=[posting, entries[0].postings[1]])
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -352,8 +356,8 @@ class TestInfrastructureRoot:
         expected_transactions = [entry for entry in entries if isinstance(entry, data.Transaction)]
         expected_balances = [entry for entry in entries if isinstance(entry, data.Balance)]
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -377,7 +381,7 @@ class TestInfrastructureRoot:
         entries, errors, _ = parser.parse_file(fixture_path)
         assert not errors
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
+        canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
 
         assert [entry for entry in canonical_entries] == [
             entry for entry in entries if not isinstance(entry, data.Pad)
