@@ -242,6 +242,21 @@ class TestInfrastructureRoot:
         assert reparsed_entries[0].meta["pwa_foo"] == "original"
         assert reparsed_entries[0].meta["pwa_foo_2"] == "renamed"
 
+    def test_canonicalization_preserves_future_valid_key_on_collision(self):
+        """A renamed key cannot consume a valid textual key encountered later."""
+        test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
+        entries, errors, options_map = loader.load_file(test_bean_file)
+        assert not errors
+        entry = entries[0]._replace(meta={**entries[0].meta, "_foo": "renamed", "pwa_foo": "original"})
+
+        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
+        content = main.print_materialized_entries(canonical_entries, options_map)
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert not reparsed_errors
+        assert reparsed_entries[0].meta["pwa_foo"] == "original"
+        assert reparsed_entries[0].meta["pwa_foo_2"] == "renamed"
+
     def test_canonicalization_covers_posting_metadata(self):
         """Posting metadata gets the same parseable-key treatment as entry metadata."""
         entries, errors, options_map = parser.parse_string(

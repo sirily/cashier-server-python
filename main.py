@@ -291,8 +291,13 @@ def canonicalize_metadata_value_for_pwa(value):
 def canonicalize_metadata_for_pwa(meta: dict) -> dict:
     """Preserve metadata while making keys and values printable/parseable."""
     canonical_meta = {}
+    reserved_keys = {
+        key
+        for key in meta
+        if TEXTUAL_METADATA_KEY_RE.match(key) and not key.startswith("_")
+    }
     for key, value in meta.items():
-        canonical_key = pwa_metadata_key(key, set(canonical_meta.keys()))
+        canonical_key = pwa_metadata_key(key, reserved_keys | set(canonical_meta.keys()))
         canonical_meta[canonical_key] = canonicalize_metadata_value_for_pwa(value)
     return canonical_meta
 
