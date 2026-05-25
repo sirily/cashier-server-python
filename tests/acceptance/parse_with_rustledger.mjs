@@ -1,4 +1,14 @@
 import http from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { initSync, Ledger } from "@rustledger/wasm";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const wasmBytes = readFileSync(
+  path.join(__dirname, "node_modules/@rustledger/wasm/rustledger_wasm_bg.wasm")
+);
+initSync({ module: wasmBytes });
 
 const PORT = process.env.PORT;
 if (!PORT) {
@@ -15,8 +25,6 @@ http.get(url, async (res) => {
     try {
       const data = JSON.parse(body);
       const content = data.content;
-
-      const { Ledger } = await import("@rustledger/wasm");
       const ledger = Ledger.fromFiles({ "main.bean": content }, "main.bean");
       const errors = ledger.getErrors();
       if (errors.length !== 0) {
