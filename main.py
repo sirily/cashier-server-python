@@ -4,13 +4,8 @@ FastAPI implementation
 """
 
 import base64
-import datetime
-import enum
 import os
-import re
 import subprocess
-from decimal import Decimal
-from io import StringIO
 from pathlib import Path
 from typing import Optional
 import uvicorn
@@ -18,7 +13,6 @@ from loguru import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from beancount.core import amount, data, inventory
 
 
 load_dotenv()
@@ -245,156 +239,50 @@ def is_root_infrastructure_path(full_file_path: Path) -> bool:
     return full_file_path.resolve() == Path(BEAN_FILE).resolve()
 
 
-TEXTUAL_METADATA_KEY_RE = re.compile(r"^[a-z][A-Za-z0-9_-]*$")
-
-
-def pwa_metadata_key(key: str, existing_keys: set[str]) -> str:
-    """Return a textual-Beancount-compatible metadata key for PWA export.
-
-    Python plugins can attach metadata using arbitrary Python dictionary keys,
-    but textual Beancount accepts only lower-case-leading metadata keys made from
-    letters, digits, underscores, and hyphens. Keep already-valid public keys as
-    they are; rename export-incompatible keys into a stable ``pwa_`` namespace
-    and avoid collisions with keys already present on the same entry/posting.
-    """
-    if TEXTUAL_METADATA_KEY_RE.match(key) and not key.startswith("_"):
-        return key
-
-    safe_suffix = re.sub(r"[^A-Za-z0-9_-]", "_", key.lstrip("_"))
-    safe_suffix = re.sub(r"^[^A-Za-z]+", "", safe_suffix) or "metadata"
-    base = f"pwa_{safe_suffix}"
-    candidate = base
-    suffix = 2
-    while candidate in existing_keys:
-        candidate = f"{base}_{suffix}"
-        suffix += 1
-    return candidate
-
-
-def canonicalize_metadata_value_for_pwa(value):
-    """Return a metadata value that Beancount's text parser can read back.
-
-    Beancount's printer can stringify arbitrary Python objects when asked, but
-    those bare strings are not necessarily valid textual metadata values. Keep
-    parser-native metadata value types unchanged; turn everything else into a
-    quoted string by returning ``str(value)``.
-    """
-    if isinstance(value, enum.Enum):
-        return value.value
-    if isinstance(value, (str, Decimal, int, float, datetime.date, amount.Amount, bool)) or value is None:
-        return value
-    if isinstance(value, (dict, inventory.Inventory)):
-        return str(value)
-    return str(value)
-
-
-def canonicalize_metadata_for_pwa(meta: dict) -> dict:
-    """Preserve metadata while making keys and values printable/parseable."""
-    canonical_meta = {}
-    reserved_keys = {
-        key
-        for key in meta
-        if TEXTUAL_METADATA_KEY_RE.match(key) and not key.startswith("_")
-    }
-    for key, value in meta.items():
-        canonical_key = pwa_metadata_key(key, reserved_keys | set(canonical_meta.keys()))
-        canonical_meta[canonical_key] = canonicalize_metadata_value_for_pwa(value)
-    return canonical_meta
-
-
-def canonicalize_entry_metadata_for_pwa(entry):
-    """Canonicalize metadata on an entry and, for transactions, its postings."""
-    canonical_entry = entry._replace(meta=canonicalize_metadata_for_pwa(entry.meta))
-    if isinstance(canonical_entry, data.Transaction):
-        canonical_postings = [
-            posting._replace(meta=canonicalize_metadata_for_pwa(posting.meta or {}))
-            for posting in canonical_entry.postings
-        ]
-        canonical_entry = canonical_entry._replace(postings=canonical_postings)
-    return canonical_entry
-
-
-def canonicalize_materialized_entries_for_pwa(entries: list) -> list:
-    """Return the post-plugin snapshot suitable for a second, offline parse.
-
-    Python Beancount leaves Pad directives in the plugin-applied entry stream
-    alongside the concrete padding transactions produced by ``beancount.ops.pad``.
-    Cashier's offline parser treats a Pad directive as an instruction to execute
-    or validate, so exporting both forms asks it to process an operation that the
-    server has already completed. Preserve every semantic result entry and omit
-    only those consumed operational Pad directives from the PWA snapshot.
-
-    Plugin code can also attach programmatic metadata keys/values that are valid
-    Python objects but invalid textual Beancount metadata (for example names
-    starting with ``_`` or tuple values). Rename those keys and stringify
-    non-native values in the PWA export while preserving entries, postings, and
-    balances.
-
-    This runs only after ``loader.load_file`` has returned without errors; an
-    invalid source book is never made exportable by canonicalization.
-    """
-    return [
-        canonicalize_entry_metadata_for_pwa(entry)
-        for entry in entries
-        if not isinstance(entry, data.Pad)
-    ]
-
-
-def print_materialized_entries(entries: list, options_map: dict) -> str:
-    """Serialize every materialized Beancount entry to parseable text.
-
-    Beancount's convenience printer uses a strict EntryPrinter by default. Real
-    plugin-applied ledgers can attach parser-valid metadata values that the
-    strict printer refuses if they were produced programmatically (for example
-    lazy-beancount valuation metadata containing a plain int). Use the same
-    printer, but enable its explicit stringify_invalid_types mode so we do not
-    drop entries or metadata just to get a printable export.
-    """
-    from beancount.parser import printer
-
-    output = StringIO()
-    eprinter = printer.EntryPrinter(
-        dcontext=options_map.get("dcontext"),
-        stringify_invalid_types=True,
-    )
-    previous_type = type(entries[0]) if entries else None
-
-    for entry in entries:
-        entry_type = type(entry)
-        if entry_type in (printer.data.Transaction, printer.data.Commodity) or entry_type is not previous_type:
-            output.write("\n")
-            previous_type = entry_type
-        output.write(eprinter(entry))
-
-    return output.getvalue()
-
 
 def render_materialized_root_book() -> str:
-    """Load the configured Beancount root and return plugin-applied text.
+    """Build a standalone source-preserving root ledger for the PWA.
 
-    The PWA consumes /infrastructure as Beancount text and parses it offline in
-    WASM. Browser WASM cannot execute Python plugin directives, so the server
-    materializes only the configured root file through the normal Python
-    Beancount loader. This preserves the existing endpoint shape while keeping
-    plugin semantics on the server side.
+    The PWA consumes /infrastructure as Beancount text and parses it offline.
+    Python plugins are executed by Beancount on the server; the snapshot builder
+    keeps unchanged source directives verbatim and prints only generated or
+    proven-safe transformed entries.
     """
     if not BEAN_FILE:
         raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
 
-    from beancount import loader
+    from cashier_snapshot import SnapshotBuildError, StandaloneSnapshotBuilder
+    from cashier_snapshot.printer import print_generated_entries_for_pwa
 
-    entries, errors, options_map = loader.load_file(BEAN_FILE)
-    if errors:
+    try:
+        content, stats = StandaloneSnapshotBuilder(
+            Path(BEAN_FILE),
+            print_generated=print_generated_entries_for_pwa,
+        ).build()
+    except SnapshotBuildError as exc:
+        error = str(exc)
+        message = "Standalone PWA snapshot could not be built"
+        if error.startswith("Beancount root book could not be materialized:"):
+            message = "Beancount root book could not be materialized"
         raise HTTPException(
             status_code=422,
             detail={
-                "message": "Beancount root book could not be materialized",
-                "errors": [str(error) for error in errors],
+                "message": message,
+                "errors": [error],
             },
-        )
+        ) from exc
 
-    snapshot_entries = canonicalize_materialized_entries_for_pwa(entries)
-    return print_materialized_entries(snapshot_entries, options_map)
+    logger.info(
+        "Built standalone PWA snapshot: retained={}, omitted_infrastructure={}, "
+        "consumed_operational={}, generated={}, transformed={}, bytes={}",
+        stats.retained,
+        stats.omitted_infrastructure,
+        stats.consumed_operational,
+        stats.generated,
+        stats.transformed,
+        len(content.encode("utf-8")),
+    )
+    return content
 
 
 def is_glob_path(file_path: str) -> bool:

@@ -14,6 +14,7 @@ RUN apt-get update \
     && pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock README.md main.py ./
+COPY cashier_snapshot ./cashier_snapshot
 RUN uv sync --frozen --no-dev
 
 RUN groupadd --system app \

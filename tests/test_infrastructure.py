@@ -9,6 +9,10 @@ from decimal import Decimal
 
 import pytest
 import main
+from cashier_snapshot.printer import (
+    canonicalize_materialized_entries_for_pwa,
+    print_materialized_entries,
+)
 from beancount import loader
 from beancount.core import amount, data, inventory
 from beancount.parser import parser
@@ -58,8 +62,8 @@ class TestInfrastructureRoot:
         assert set(result.keys()) == {"content"}
         assert 'plugin "beancount.plugins.implicit_prices"' not in result["content"]
         assert 'include "' not in result["content"]
-        assert 'Assets:Cash               10 USD' in result["content"]
-        assert 'Equity:Opening-Balances  -10 USD' in result["content"]
+        assert 'Assets:Cash  10 USD' in result["content"]
+        assert 'Equity:Opening-Balances' in result["content"]
 
     def test_infrastructure_root_materialization_reports_loader_errors(self):
         """Invalid root materialization returns a controlled error instead of raw source."""
@@ -85,7 +89,7 @@ class TestInfrastructureRoot:
         assert not errors
         entries = [entry._replace(meta={**entry.meta, "generated_index": 2}) for entry in entries]
 
-        content = main.print_materialized_entries(entries, options_map)
+        content = print_materialized_entries(entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -107,6 +111,123 @@ class TestInfrastructureRoot:
         assert any(type(entry).__name__ == "Custom" for entry in reparsed_entries)
         assert '2024-01-01 custom "valuation" "Assets:Broker:Total" 7500.0 USD' in content
 
+    def test_infrastructure_root_preserves_exact_price_syntax_from_plugin_ledger(self):
+        """A standalone export keeps source @@ and @ notation across Python plugin execution."""
+        main.BEAN_FILE = os.path.join(TEST_DIR, "fixtures", "plugin_ledger", "main.bean")
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 200
+        content = response.json()["content"]
+        assert '"Rounded FX exact total"' in content
+        assert "Assets:MyFavouriteBank:Cash -1000 GBP @@ 1234.56 USD" in content
+        assert '"Unit FX price remains unit price"' in content
+        assert "Assets:MyFavouriteBank:Cash -10 GBP @ 1.23 USD" in content
+
+    def test_infrastructure_root_rejects_scoped_source_directive_until_preservation_is_implemented(
+        self, tmp_path
+    ):
+        """Fail closed for scoped directives whose order would affect source semantics."""
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:Cash USD\n"
+            "2024-01-01 open Income:Salary USD\n\n"
+            "pushtag #taxable\n"
+            '2024-01-02 * "Salary"\n'
+            "  Assets:Cash 1 USD\n"
+            "  Income:Salary -1 USD\n"
+            "poptag #taxable\n",
+            encoding="utf-8",
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "Unsupported non-entry source directive" in response.json()["detail"]["errors"][0]
+
+    def test_infrastructure_root_rejects_plugin_without_export_policy(self, tmp_path):
+        """Standalone export must not execute an unreviewed Python plugin."""
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'plugin "unknown.package.plugin"\n\n'
+            "2024-01-01 open Assets:Cash USD\n",
+            encoding="utf-8",
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "no export policy" in response.json()["detail"]["errors"][0]
+
+    def test_infrastructure_root_rejects_transformed_exact_price_source(
+        self, tmp_path, monkeypatch
+    ):
+        """A plugin-modified priced source entry cannot be normalized through the printer."""
+        from cashier_snapshot import builder as snapshot_builder
+
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:Cash GBP\n"
+            "2024-01-01 open Equity:Opening-Balances USD\n\n"
+            '2024-01-03 * "FX"\n'
+            "  Assets:Cash -1000 GBP @@ 1234.56 USD\n"
+            "  Equity:Opening-Balances 1234.56 USD\n",
+            encoding="utf-8",
+        )
+        entries, errors, options_map = parser.parse_file(str(test_bean_file))
+        assert not errors
+        entries[-1] = entries[-1]._replace(narration="Plugin-modified FX")
+        monkeypatch.setattr(
+            snapshot_builder.loader,
+            "load_file",
+            lambda _: (entries, [], options_map),
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "cannot safely export transformed source directive" in (
+            response.json()["detail"]["errors"][0]
+        )
+
+    def test_infrastructure_root_rejects_transformed_exact_total_cost_source(
+        self, tmp_path, monkeypatch
+    ):
+        """A transformed total-cost source must not lose exact ``{{ ... }}`` syntax."""
+        from cashier_snapshot import builder as snapshot_builder
+
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:Holding HOOL\n"
+            "2024-01-01 open Assets:Cash USD\n\n"
+            '2024-01-03 * "Cost"\n'
+            "  Assets:Holding 3 HOOL {{ 100.00 USD }}\n"
+            "  Assets:Cash -100.00 USD\n",
+            encoding="utf-8",
+        )
+        entries, errors, options_map = parser.parse_file(str(test_bean_file))
+        assert not errors
+        entries[-1] = entries[-1]._replace(narration="Plugin-modified total cost")
+        monkeypatch.setattr(
+            snapshot_builder.loader,
+            "load_file",
+            lambda _: (entries, [], options_map),
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "cannot safely export transformed source directive" in (
+            response.json()["detail"]["errors"][0]
+        )
+
     def test_canonicalization_preserves_programmatic_private_metadata_as_textual_metadata(self):
         """Programmatic metadata keys invalid in textual Beancount are renamed, not dropped."""
         test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
@@ -114,8 +235,8 @@ class TestInfrastructureRoot:
         assert not errors
         entries = [entry._replace(meta={**entry.meta, "_timesApplied": 2}) for entry in entries]
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -145,8 +266,8 @@ class TestInfrastructureRoot:
             }
         )
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -191,8 +312,8 @@ class TestInfrastructureRoot:
             }
         )
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -218,8 +339,8 @@ class TestInfrastructureRoot:
         assert not errors
         entry = entries[0]._replace(meta={**entries[0].meta, "_tuple": (1, 2), "bad/key": ReprValue()})
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -234,8 +355,8 @@ class TestInfrastructureRoot:
         assert not errors
         entry = entries[0]._replace(meta={**entries[0].meta, "pwa_foo": "original", "_foo": "renamed"})
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -249,8 +370,8 @@ class TestInfrastructureRoot:
         assert not errors
         entry = entries[0]._replace(meta={**entries[0].meta, "_foo": "renamed", "pwa_foo": "original"})
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -266,8 +387,8 @@ class TestInfrastructureRoot:
         posting = entries[0].postings[0]._replace(meta={"pwa_post": "original", "_post": "renamed", "foo.bar": 3})
         entry = entries[0]._replace(postings=[posting, entries[0].postings[1]])
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa([entry])
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -291,8 +412,8 @@ class TestInfrastructureRoot:
         expected_transactions = [entry for entry in entries if isinstance(entry, data.Transaction)]
         expected_balances = [entry for entry in entries if isinstance(entry, data.Balance)]
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
-        content = main.print_materialized_entries(canonical_entries, options_map)
+        canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
+        content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
@@ -316,7 +437,7 @@ class TestInfrastructureRoot:
         entries, errors, _ = parser.parse_file(fixture_path)
         assert not errors
 
-        canonical_entries = main.canonicalize_materialized_entries_for_pwa(entries)
+        canonical_entries = canonicalize_materialized_entries_for_pwa(entries)
 
         assert [entry for entry in canonical_entries] == [
             entry for entry in entries if not isinstance(entry, data.Pad)

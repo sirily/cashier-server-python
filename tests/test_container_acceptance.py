@@ -153,6 +153,19 @@ class TestContainerAcceptance:
         assert "Assets:MyAutomaticBroker:Total" in content
         assert "Assets:MyFavouriteBank:Cash" in content
         assert "Equity:RegularTransacionForSummariesFrom" in content
+        assert '"Rounded FX exact total"' in content
+        assert "Assets:MyFavouriteBank:Cash -1000 GBP @@ 1234.56 USD" in content
+        assert '"Unit FX price remains unit price"' in content
+        assert "Assets:MyFavouriteBank:Cash -10 GBP @ 1.23 USD" in content
+
+        # Production-like transforming plugins are active, not merely declared.
+        # filter_map tags mapped operations and the recur/split plugins materialize
+        # their transformed transaction forms in the standalone snapshot.
+        assert 'custom "filter-map" "apply" "recurring" "#subscription-year"' in content
+        assert '"Monthly rent" #recurring' in content
+        assert '"Regular transaction for summaries (recur 1/151)" #auxiliary #recurred' in content
+        assert '"Subscription for SomeService paid in a year-instalment (split 1/12)"' in content
+        assert "#splitted" in content
 
     def test_infrastructure_includes_supporting_files(self):
         status, body = _get("/infrastructure", params={"file_path": "accounts.bean"})
@@ -166,16 +179,11 @@ class TestContainerAcceptance:
         assert "AUTO_BROKER_USD" in data["content"]
 
     def test_materialized_content_reparses(self):
-        """The materialized snapshot from /infrastructure must reparse with 0 errors.
-
-        This validates the PWA parser-boundary contract: the output is valid
-        Beancount text that can be consumed by an offline parser.
-        """
+        """The materialized snapshot must be valid Python-Beancount text."""
         status, body = _get("/infrastructure", params={"file_path": "main.bean"})
         assert status == 200
         content = json.loads(body)["content"]
 
-        # Use beancount's own parser to validate the snapshot
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".bean", delete=False) as f:
             f.write(content)
@@ -187,6 +195,20 @@ class TestContainerAcceptance:
             assert len(reparsed) > 0, "Materialized snapshot produced no entries"
         finally:
             os.unlink(tmp_path)
+
+    def test_materialized_content_parses_with_pwa_rustledger_engine(self):
+        """The actual PWA WASM engine must accept the standalone snapshot with 0 errors."""
+        script = os.path.join(os.path.dirname(__file__), "acceptance", "parse_with_rustledger.mjs")
+        result = subprocess.run(
+            ["node", script],
+            env={**os.environ, "PORT": str(HOST_PORT)},
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "RustLedger parsed materialized snapshot with 0 errors" in result.stdout
+        assert "RustLedger rejects lossy @@ -> @ rewrite with" in result.stdout
 
     def test_materialized_content_has_no_invalid_private_metadata(self):
         """Invalid private metadata (_-prefixed keys) must be canonicalized away."""

@@ -51,6 +51,12 @@ The server runs on 0.0.0.0:3000, matching the Rust implementation.
 
 CORS is enabled for all origins, similar to the Rust implementation.
 
+## Architecture documents
+
+- [`docs/architecture/standalone-pwa-ledger-snapshot.md`](docs/architecture/standalone-pwa-ledger-snapshot.md) — design for producing one source-preserving standalone `main.bean` for offline Cashier PWA sync.
+- [`docs/architecture/standalone-pwa-ledger-implementation-plan.md`](docs/architecture/standalone-pwa-ledger-implementation-plan.md) — staged implementation and verification plan.
+- [`docs/architecture/production-plugin-export-policy-audit.md`](docs/architecture/production-plugin-export-policy-audit.md) — required plugin behavior audit before changing the production export path.
+
 ## Development
 
 VSCode recommended.

@@ -1,0 +1,78 @@
+"""Build a standalone ledger without round-tripping unchanged source entries."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from beancount import loader
+from beancount.core import data
+
+from .errors import SnapshotBuildError
+from .plugin_policies import validate_source_preserving_plugins
+from .reconcile import classify_source_entries, final_origin_key
+from .source_index import SourceLedgerIndex
+
+
+@dataclass
+class SnapshotStats:
+    retained: int = 0
+    omitted_infrastructure: int = 0
+    consumed_operational: int = 0
+    generated: int = 0
+    transformed: int = 0
+
+
+class StandaloneSnapshotBuilder:
+    """Coordinate source indexing, plugin materialization and snapshot output."""
+
+    def __init__(
+        self,
+        root_path: Path,
+        print_generated: Callable[[list, dict], str],
+    ):
+        self.root_path = root_path.resolve()
+        self.print_generated = print_generated
+
+    def build(self) -> tuple[str, SnapshotStats]:
+        source_index = SourceLedgerIndex.build(self.root_path)
+        validate_source_preserving_plugins(source_index.plugin_names)
+
+        entries, errors, options_map = loader.load_file(str(self.root_path))
+        if errors:
+            raise SnapshotBuildError(
+                "Beancount root book could not be materialized: "
+                + "; ".join(str(error) for error in errors)
+            )
+
+        entry_blocks = source_index.entry_blocks
+        retained_indices, transformed_indices = classify_source_entries(entries, entry_blocks)
+        stats = SnapshotStats(
+            omitted_infrastructure=sum(
+                block.kind in {"plugin", "include"} for block in source_index.blocks
+            )
+        )
+
+        output: list[str] = []
+        for block in source_index.blocks:
+            if block.kind == "header":
+                output.append(block.text)
+
+        for index, entry in enumerate(entries):
+            source_block = entry_blocks.get(final_origin_key(entry))
+            if isinstance(entry, data.Pad):
+                stats.consumed_operational += 1
+                continue
+            if index in retained_indices:
+                assert source_block is not None
+                output.append(source_block.text)
+                stats.retained += 1
+                continue
+            output.append(self.print_generated([entry], options_map))
+            if index in transformed_indices:
+                stats.transformed += 1
+            else:
+                stats.generated += 1
+
+        return "".join(output), stats
