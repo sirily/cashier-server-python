@@ -1,0 +1,42 @@
+1970-01-01 commodity GBP
+  asset_class: "currency"
+
+1970-01-01 commodity USD
+  asset_class: "currency"
+
+1970-01-01 commodity EUR
+  asset_class: "currency"
+
+1970-01-01 commodity GOLD
+  asset_class: "currency"
+
+1970-01-01 commodity SPY
+  asset_class: "stock"
+  asset_allocation_stocks: 100
+
+1970-01-01 commodity VANGUARD-LS-80
+  asset_class: "fund"
+  asset_allocation_bonds_corporate: 1.7
+  asset_allocation_bonds_government: 18.3
+  asset_allocation_equity_emerging: 7.5
+  asset_allocation_equity_global: 72.5
+
+1970-01-01 commodity ETH
+  asset_class: "crypto"
+  asset_allocation_crypto: 100
+
+1970-01-01 commodity AUTO_BROKER_USD
+  asset_class: "fund"
+  asset_allocation_other: 3
+  asset_allocation_bonds_government: 7
+  asset_allocation_bonds_corporate: 10
+  asset_allocation_equity_global: 20
+  asset_allocation_equity_emerging: 20
+  asset_allocation_equity_developed: 40
+
+2020-01-01 commodity CPI
+  name: "Consumer Price Index"
+
+2020-01-01 price CPI 258.8 USD
+2021-01-01 price CPI 271.0 USD
+2022-01-01 price CPI 292.7 USD

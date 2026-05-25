@@ -1,0 +1,4 @@
+2023-12-03 * "Regular transaction for summaries" #auxiliary
+    recur: " / 6 days"
+  Equity:RegularTransacionForSummariesFrom 0 USD
+  Equity:RegularTransacionForSummariesTo 0 USD
