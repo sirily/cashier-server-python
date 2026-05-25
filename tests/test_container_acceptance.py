@@ -259,17 +259,14 @@ class TestContainerAcceptance:
             os.unlink(tmp_path)
 
     def test_image_has_required_plugin_modules(self):
-        """Verify all required plugin modules are importable inside the built image.
-
-        filter_map is excluded because it requires fava, which is not in the
-        server image (the fixture does not load the filter_map plugin).
-        """
+        """Verify all required plugin modules are importable inside the built image."""
         modules = [
             "beancount_lazy_plugins.valuation",
             "beancount_lazy_plugins.generate_inverse_prices",
             "beancount_lazy_plugins.generate_base_ccy_prices",
             "beancount_lazy_plugins.group_pad_transactions",
             "beancount_lazy_plugins.auto_accounts",
+            "beancount_lazy_plugins.filter_map",
             "beancount_share.share",
             "beancount_reds_plugins.effective_date.effective_date",
             "beancount_interpolate.recur",
@@ -283,6 +280,21 @@ class TestContainerAcceptance:
         if result.returncode != 0:
             raise AssertionError(
                 f"Plugin import check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+
+    def test_materialized_content_reparses_with_rustledger(self):
+        """Materialized snapshot must parse with 0 errors in @rustledger/wasm (PWA boundary)."""
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "acceptance", "parse_with_rustledger.mjs"
+        )
+        result = subprocess.run(
+            ["node", script],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PORT": str(HOST_PORT)},
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"RustLedger parse check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
             )
 
 

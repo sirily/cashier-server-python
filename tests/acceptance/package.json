@@ -1,0 +1,8 @@
+{
+  "name": "cashier-server-acceptance",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@rustledger/wasm": "0.14.1"
+  }
+}

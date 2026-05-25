@@ -14,3 +14,6 @@ wheels/
 
 # ledger configuration
 .ledgerrc
+
+# Node.js dependencies for acceptance tests
+tests/acceptance/node_modules/

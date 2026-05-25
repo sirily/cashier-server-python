@@ -62,7 +62,8 @@ plugin "beancount.ops.pad"
 plugin "beancount.ops.balance"
 plugin "beancount_lazy_plugins.group_pad_transactions"
 
-; filter_map requires fava, not included in server fixture
+plugin "beancount_lazy_plugins.filter_map"
+include "filter_map.bean"
 
 plugin "beancount_interpolate.recur"
 plugin "beancount_interpolate.split"

@@ -72,6 +72,11 @@ jobs:
           tags: cashier-server-acceptance:test
           cache-from: type=gha
 
+      - name: Install acceptance test Node dependencies
+        if: ${{ github.event_name == 'pull_request' || github.ref_name == 'fix-production-plugin-runtime' }}
+        run: npm ci
+        working-directory: tests/acceptance
+
       - name: Run container acceptance tests
         if: ${{ github.event_name == 'pull_request' || github.ref_name == 'fix-production-plugin-runtime' }}
         run: |
