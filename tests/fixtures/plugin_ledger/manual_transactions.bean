@@ -1,0 +1,115 @@
+2023-11-01 * "MyAutomaticBroker initial"
+  Assets:MyAutomaticBroker:Total    7500 USD
+  Equity:OpeningBalances:MyAutomaticBroker:Total   -7500 USD
+
+2024-01-03 * "Salary from MyEmployer"
+  Assets:MyFavouriteBank:Cash    2000 GBP
+  Income:Salary:MyEmployer   -2000 GBP
+
+2024-02-03 * "Salary from MyEmployer"
+  Assets:MyFavouriteBank:Cash    2000 GBP
+  Income:Salary:MyEmployer   -2000 GBP
+
+2024-03-03 * "Salary from MyEmployer"
+  Assets:MyFavouriteBank:Cash    2000 GBP
+  Income:Salary:MyEmployer   -2000 GBP
+
+2024-04-03 * "Salary from MyEmployer"
+  Assets:MyFavouriteBank:Cash    2000 GBP
+  Income:Salary:MyEmployer   -2000 GBP
+
+2024-01-15 * "Withdrawn cash"
+  Assets:MyFavouriteBank:Cash    -100 GBP
+  Assets:Physical:Cash   100 GBP
+
+2024-02-19 * "Withdrawn cash"
+  Assets:MyFavouriteBank:Cash    -150 GBP
+  Assets:Physical:Cash   150 GBP
+
+2024-04-11 * "Withdrawn cash"
+  Assets:MyFavouriteBank:Cash    -100 GBP
+  Assets:Physical:Cash   100 GBP
+
+2024-01-03 * "Monthly rent"
+  Assets:MyFavouriteBank:Cash    -500 GBP
+  Expenses:Accommodation   500 GBP
+
+2024-02-03 * "Monthly rent"
+  Assets:MyFavouriteBank:Cash    -500 GBP
+  Expenses:Accommodation   500 GBP
+
+2024-03-03 * "Monthly rent"
+  Assets:MyFavouriteBank:Cash    -500 GBP
+  Expenses:Accommodation   500 GBP
+
+2024-04-03 * "Monthly rent"
+  Assets:MyFavouriteBank:Cash    -500 GBP
+  Expenses:Accommodation   500 GBP
+
+2024-05-03 * "Monthly rent"
+  Assets:MyFavouriteBank:Cash    -500 GBP
+  Expenses:Accommodation   500 GBP
+
+2024-06-03 * "Monthly rent"
+  Assets:MyFavouriteBank:Cash    -500 GBP
+  Expenses:Accommodation   500 GBP
+
+2024-03-10 * "Subscription for SomeService paid in a year-instalment" #subscription-year
+  Assets:MyFavouriteBank:Cash    -70 USD
+  Expenses:Services   70 USD
+
+2024-01-03 * "Some transaction for Expenses:Donations"
+  Assets:MyLessFavouriteBank:Cash -90 USD
+  Expenses:Donations 90 USD
+
+2024-01-04 * "Some transaction for Expenses:Groceries"
+  Assets:MyFavouriteBank:Cash -11 USD
+  Expenses:Groceries 11 USD
+
+2024-01-07 * "Some transaction for Expenses:EatingOut:Coffee"
+  Assets:Physical:Cash -3 USD
+  Expenses:EatingOut:Coffee 3 USD
+
+2024-01-08 * "Some transaction for Expenses:Shopping"
+  Assets:Physical:Cash -68 USD
+  Expenses:Shopping 68 USD
+
+2024-01-09 * "Some transaction for Expenses:Groceries"
+  Assets:MyFavouriteBank:Cash -9 USD
+  Expenses:Groceries 9 USD
+
+2024-01-11 * "Some transaction for Expenses:Travel:Flights" #travel #trip-island-vacation
+  Assets:MyLessFavouriteBank:Cash -203 USD
+  Expenses:Travel:Flights 203 USD
+
+2024-01-15 * "Some transaction for Expenses:EatingOut" #trip-island-vacation
+  Assets:MyFavouriteBank:Cash -17 USD
+  Expenses:EatingOut 17 USD
+
+2024-01-18 * "Some transaction for Expenses:EatingOut:Coffee"
+  Assets:MyFavouriteBank:Cash -4 USD
+  Expenses:EatingOut:Coffee 4 USD
+
+2024-01-19 * "Some transaction for Expenses:Groceries"
+  Assets:MyFavouriteBank:Cash -35 USD
+  Expenses:Groceries 35 USD
+
+2024-01-20 * "Some transaction for Expenses:Groceries"
+  Assets:MyFavouriteBank:Cash -34 USD
+  Expenses:Groceries 34 USD
+
+2024-01-22 * "Some transaction for Expenses:EatingOut"
+  Assets:Physical:Cash -28 USD
+  Expenses:EatingOut 28 USD
+
+2024-01-27 * "Some transaction for Expenses:Groceries"
+  Assets:Physical:Cash -5 USD
+  Expenses:Groceries 5 USD
+
+2024-01-30 * "Some transaction for Expenses:Groceries"
+  Assets:MyFavouriteBank:Cash -28 USD
+  Expenses:Groceries 28 USD
+
+2024-01-31 * "Some transaction for Expenses:Groceries"
+  Assets:MyFavouriteBank:Cash -16 USD
+  Expenses:Groceries 16 USD

@@ -60,6 +60,46 @@ wheels = [
 ]
 
 [[package]]
+name = "beancount-interpolate"
+version = "2.5.0"
+source = { git = "https://github.com/Akuukis/beancount_interpolate.git?rev=e9c1241d5980781d270a7cc5c17cf2ca99c10faa#e9c1241d5980781d270a7cc5c17cf2ca99c10faa" }
+dependencies = [
+    { name = "beancount" },
+    { name = "beancount-plugin-utils" },
+]
+
+[[package]]
+name = "beancount-lazy-plugins"
+version = "0.0.post1.dev107+g28e1dd1eb"
+source = { git = "https://github.com/Evernight/beancount-lazy-plugins.git?rev=28e1dd1eb54038eb9e610036cc96a510f81bbde1#28e1dd1eb54038eb9e610036cc96a510f81bbde1" }
+
+[[package]]
+name = "beancount-plugin-utils"
+version = "0.0.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/53/70b3ddb03709c5b29ddf17156dbb0a4417f630b07a18c14fda8f7e44a5a0/beancount_plugin_utils-0.0.4.tar.gz", hash = "sha256:e9d781defdf3ccf4245dbf2168438fe0a9e4b0a6b1d38499f9804b6a0a5a778a", size = 10331, upload-time = "2021-01-11T17:30:07.737Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/67/1d4d3bb5be036c265f613af728116a1d32ad7489ac2fcbd6a00f4371b153/beancount_plugin_utils-0.0.4-py3-none-any.whl", hash = "sha256:d87963ad75dff5137cc8baf0eddb86f23bb6dfb5fe347a41bc42ac739713991d", size = 25028, upload-time = "2021-01-11T17:30:06.2Z" },
+]
+
+[[package]]
+name = "beancount-reds-plugins"
+version = "0.4.0"
+source = { git = "https://github.com/redstreet/beancount_reds_plugins.git?rev=41af12d13c6ba5b2949b2939dfa180f43a5cb307#41af12d13c6ba5b2949b2939dfa180f43a5cb307" }
+dependencies = [
+    { name = "beancount" },
+]
+
+[[package]]
+name = "beancount-share"
+version = "0.1.11"
+source = { git = "https://github.com/Akuukis/beancount_share.git?rev=4101c45e16948c0683520cebcf88afe4862224c4#4101c45e16948c0683520cebcf88afe4862224c4" }
+dependencies = [
+    { name = "beancount" },
+    { name = "beancount-plugin-utils" },
+]
+
+[[package]]
 name = "beanquery"
 version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -80,6 +120,10 @@ version = "0.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "beancount" },
+    { name = "beancount-interpolate" },
+    { name = "beancount-lazy-plugins" },
+    { name = "beancount-reds-plugins" },
+    { name = "beancount-share" },
     { name = "beanquery" },
     { name = "fastapi" },
     { name = "loguru" },
@@ -92,11 +136,16 @@ dev = [
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-timeout" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "beancount", specifier = ">=3.2.0" },
+    { name = "beancount-interpolate", git = "https://github.com/Akuukis/beancount_interpolate.git?rev=e9c1241d5980781d270a7cc5c17cf2ca99c10faa" },
+    { name = "beancount-lazy-plugins", git = "https://github.com/Evernight/beancount-lazy-plugins.git?rev=28e1dd1eb54038eb9e610036cc96a510f81bbde1" },
+    { name = "beancount-reds-plugins", git = "https://github.com/redstreet/beancount_reds_plugins.git?rev=41af12d13c6ba5b2949b2939dfa180f43a5cb307" },
+    { name = "beancount-share", git = "https://github.com/Akuukis/beancount_share.git?rev=4101c45e16948c0683520cebcf88afe4862224c4" },
     { name = "beanquery", specifier = ">=0.2.0" },
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -109,6 +158,7 @@ dev = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-timeout", specifier = ">=2.3.1" },
 ]
 
 [[package]]
@@ -336,6 +386,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+]
+
+[[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
 ]
 
 [[package]]
