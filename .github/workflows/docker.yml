@@ -41,7 +41,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@6b9c6063abd6010835654f32e52b6aa8f52c55b3 # v5
+        uses: astral-sh/setup-uv@2af22b5b2dcfc0729ee842c635f300f1fc5a9e9a # v5.0.0
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
