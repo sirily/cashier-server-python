@@ -9,6 +9,7 @@ from pathlib import Path
 from beancount import loader
 from beancount.core import data
 
+from .booking_baseline import load_booked_source_entries
 from .errors import SnapshotBuildError
 from .plugin_policies import validate_source_preserving_plugins
 from .reconcile import classify_source_entries, final_origin_key
@@ -46,6 +47,16 @@ class StandaloneSnapshotBuilder:
         source_index = SourceLedgerIndex.build(self.root_path)
         validate_source_preserving_plugins(source_index.plugin_names)
 
+        booked_entries, booking_errors, _ = load_booked_source_entries(self.root_path)
+        if booking_errors:
+            raise SnapshotBuildError(
+                "Beancount root book could not be core-booked before materialization: "
+                + "; ".join(str(error) for error in booking_errors)
+            )
+        booked_entries_by_origin = {
+            final_origin_key(entry): entry for entry in booked_entries
+        }
+
         entries, errors, options_map = loader.load_file(str(self.root_path))
         if errors:
             raise SnapshotBuildError(
@@ -53,8 +64,14 @@ class StandaloneSnapshotBuilder:
                 + "; ".join(str(error) for error in errors)
             )
 
-        entry_blocks = source_index.entry_blocks
-        retained_indices, transformed_indices = classify_source_entries(entries, entry_blocks)
+        entry_blocks = {
+            block.origin_key: block
+            for block in source_index.blocks
+            if block.origin_key is not None
+        }
+        retained_indices, transformed_indices = classify_source_entries(
+            entries, entry_blocks, booked_entries_by_origin
+        )
         stats = SnapshotStats(
             omitted_infrastructure=sum(
                 block.kind in {"plugin", "include"} for block in source_index.blocks

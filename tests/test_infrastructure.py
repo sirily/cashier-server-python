@@ -520,6 +520,55 @@ class TestInfrastructureRoot:
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
         assert not reparsed_errors
 
+    def test_infrastructure_root_rejects_plugin_mutated_cost_behind_empty_fifo_source(
+        self, tmp_path, monkeypatch
+    ):
+        """A plugin cannot hide a changed booked lot behind retained raw ``{}`` text."""
+        from cashier_snapshot import builder as snapshot_builder
+
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:MyStockBroker:SPY SPY\n"
+            "2024-01-01 open Assets:MyStockBroker:Cash USD\n"
+            "2024-01-01 open Equity:Opening-Balances USD\n"
+            "2024-01-01 open Income:MyStockBroker:PnL USD\n\n"
+            '2024-04-11 * "Buy SPY"\n'
+            "  Assets:MyStockBroker:SPY  2 SPY {517.9 USD}\n"
+            "  Equity:Opening-Balances -1035.8 USD\n\n"
+            '2024-06-17 * "Sell SPY"\n'
+            "  Assets:MyStockBroker:SPY  -2 SPY {} @ 547 USD\n"
+            "  Assets:MyStockBroker:Cash 1094 USD\n"
+            "  Income:MyStockBroker:PnL -58.2 USD\n",
+            encoding="utf-8",
+        )
+        entries, errors, options_map = loader.load_file(str(test_bean_file))
+        assert not errors
+        sell = next(
+            entry
+            for entry in entries
+            if isinstance(entry, data.Transaction) and entry.narration == "Sell SPY"
+        )
+        changed_postings = list(sell.postings)
+        changed_postings[0] = changed_postings[0]._replace(
+            cost=data.Cost(Decimal("999"), "USD", None, "plugin-selected")
+        )
+        changed_sell = sell._replace(postings=changed_postings)
+        mutated_entries = [changed_sell if entry is sell else entry for entry in entries]
+        monkeypatch.setattr(
+            snapshot_builder.loader,
+            "load_file",
+            lambda _: (mutated_entries, [], options_map),
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "cannot safely export transformed source directive" in (
+            response.json()["detail"]["errors"][0]
+        )
+
     def test_is_empty_cost_spec_rejects_non_empty(self):
         """A fully-specified CostSpec (e.g. {517.9 USD}) must not be treated as empty."""
         from cashier_snapshot.reconcile import _is_empty_cost_spec
