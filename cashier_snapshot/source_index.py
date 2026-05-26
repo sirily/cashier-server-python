@@ -170,7 +170,12 @@ class SourceLedgerIndex:
                     )
                     continue
 
-                if stripped.startswith("option ") or not stripped or stripped.startswith(";"):
+                if (
+                    stripped.startswith("option ")
+                    or not stripped
+                    or stripped.startswith(";")
+                    or stripped.startswith("*")
+                ):
                     self.blocks.append(
                         SourceBlock(path, relative_path, lineno, "header", text)
                     )

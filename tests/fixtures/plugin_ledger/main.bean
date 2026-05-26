@@ -1,3 +1,6 @@
+* Beancount configuration
+; Note that plugin order is important
+
 option "plugin_processing_mode" "raw"
 option "booking_method" "FIFO"
 
