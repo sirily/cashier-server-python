@@ -1,9 +1,10 @@
 # Проект: автономный `main.bean` для Cashier PWA без потери семантики исходной книги
 
-- Статус: реализовано в текущей ветке; подтверждено Docker/RustLedger acceptance
+- Статус: PR #6 был смержен, но production QA выявил regression; документ ниже фиксирует обязательный follow-up перед новым merge
 - Область изменений: `cashier-server-python`
 - Целевой endpoint: `GET /infrastructure?file_path=main.bean`
 - Потребитель результата: Cashier PWA через `@rustledger/wasm@0.14.1`
+- Процессное ограничение: новые PR по этому направлению нельзя мержить без явного разрешения владельца репозитория
 
 ## 1. Задача
 
@@ -81,6 +82,25 @@ Cashier PWA должен получить от сервера один авто�
 - исходные фрагменты posting-ов, включая `@` и `@@`.
 
 Для хранения текста недостаточно объектов, полученных из Beancount parser: исходная форма `@@` в них уже отсутствует. Нужен слой, сохраняющий текстовые блоки до вызова Beancount loader. Первоначально это может быть безопасный сканер директивных блоков с привязкой к `filename`/`lineno`; если его недостаточно для поддерживаемого синтаксиса, потребуется полноценное представление исходного текста с позициями.
+
+### 5.1.1. Production regression после PR #6
+
+Production root `main.bean` может начинаться с prose/org-style заголовков, например:
+
+```beancount
+* Beancount configuration
+; Note that plugin order is important
+
+option "plugin_processing_mode" "raw"
+```
+
+Такие строки не являются бухгалтерскими entries и не должны приводить к выдаче потенциально искажённого снимка. Source-preserving builder обязан обрабатывать их явно:
+
+- regression test должен начинаться именно с org-heading на первой строке root file;
+- endpoint `/infrastructure?file_path=main.bean` должен возвращать `200`, а не `422 Unsupported non-entry source directive at main.bean:1`;
+- итоговый snapshot должен оставаться валидным для `@rustledger/wasm@0.14.1`;
+- если RustLedger не принимает такие prose строки как есть, builder должен преобразовать их в Beancount comments, сохранив текст и не меняя бухгалтерскую семантику;
+- это правило должно войти в clean Docker acceptance, чтобы fixture покрывал production-shape root preamble, а не только `@@`-семантику.
 
 ### 5.2. Выполнение книги на сервере
 
