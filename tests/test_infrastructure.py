@@ -485,6 +485,57 @@ class TestInfrastructureRoot:
         ]
         assert len(entries) - len(canonical_entries) == sum(isinstance(entry, data.Pad) for entry in entries)
 
+    def test_infrastructure_root_retains_fifo_booked_cost_spec(self, tmp_path):
+        """FIFO ``{}`` cost spec and inferred PnL must not cause 422, must keep source verbatim."""
+        root = tmp_path / "main.bean"
+        root.write_text(
+            'option "operating_currency" "USD"\n'
+            'option "booking_method" "FIFO"\n'
+            '\n'
+            "1970-01-01 commodity SPY\n"
+            '\n'
+            "1970-01-01 open Assets:MyStockBroker:SPY SPY\n"
+            "1970-01-01 open Assets:MyStockBroker:Cash USD\n"
+            "1970-01-01 open Expenses:MyBroker:Commissions USD\n"
+            "1970-01-01 open Income:MyBroker:PnL USD\n"
+            '\n'
+            '2024-04-11 * "Buy SPY"\n'
+            '  Assets:MyStockBroker:SPY 2 SPY {517.9 USD}\n'
+            '  Assets:MyStockBroker:Cash -1035.80 USD\n'
+            '\n'
+            '2024-06-17 * "Sell SPY"\n'
+            '  Assets:MyStockBroker:SPY -2 SPY {} @ 547 USD\n'
+            '  Assets:MyStockBroker:Cash 1090.99 USD\n'
+            '  Expenses:MyBroker:Commissions 3.01 USD\n'
+            '  Income:MyBroker:PnL\n',
+            encoding="utf-8",
+        )
+        main.BEAN_FILE = str(root)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 200
+        content = response.json()["content"]
+        assert "-2 SPY {} @ 547 USD" in content
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+        assert not reparsed_errors
+
+    def test_is_empty_cost_spec_rejects_non_empty(self):
+        """A fully-specified CostSpec (e.g. {517.9 USD}) must not be treated as empty."""
+        from cashier_snapshot.reconcile import _is_empty_cost_spec
+        from beancount.core.number import MISSING
+
+        empty = data.CostSpec(
+            number_per=MISSING, number_total=None, currency=MISSING,
+            date=None, label=None, merge=False,
+        )
+        non_empty = data.CostSpec(
+            number_per=Decimal("517.9"), number_total=None, currency="USD",
+            date=None, label=None, merge=False,
+        )
+        assert _is_empty_cost_spec(empty)
+        assert not _is_empty_cost_spec(non_empty)
+
 
 class TestInfrastructure:
 

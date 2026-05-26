@@ -34,12 +34,33 @@ def _source_semantics(entry):
     return clean_entry
 
 
+def _is_empty_cost_spec(cost) -> bool:
+    """Return True for an empty/unspecified CostSpec (``{}`` syntax).
+
+    The Python Beancount parser produces this form before FIFO booking
+    populates the concrete cost.  It is safe to retain the original source
+    text because no explicit cost semantics are erased.
+    """
+    return (
+        isinstance(cost, data.CostSpec)
+        and cost.number_per is MISSING
+        and cost.number_total is None
+        and cost.currency is MISSING
+        and cost.date is None
+        and cost.label is None
+        and cost.merge is False
+    )
+
+
 def _posting_matches_source(source_posting, final_posting) -> bool:
     if source_posting.account != final_posting.account:
         return False
     if source_posting.units is not MISSING and source_posting.units != final_posting.units:
         return False
-    if source_posting.cost != final_posting.cost or source_posting.price != final_posting.price:
+    if _is_empty_cost_spec(source_posting.cost):
+        if source_posting.price != final_posting.price:
+            return False
+    elif source_posting.cost != final_posting.cost or source_posting.price != final_posting.price:
         return False
     if source_posting.flag != final_posting.flag:
         return False
