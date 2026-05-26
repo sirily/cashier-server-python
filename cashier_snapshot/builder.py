@@ -24,6 +24,13 @@ class SnapshotStats:
     transformed: int = 0
 
 
+def append_snapshot_block(output: list[str], text: str) -> None:
+    """Append a ledger block without concatenating adjacent directives."""
+    if output and output[-1] and not output[-1].endswith("\n"):
+        output.append("\n")
+    output.append(text)
+
+
 class StandaloneSnapshotBuilder:
     """Coordinate source indexing, plugin materialization and snapshot output."""
 
@@ -57,7 +64,7 @@ class StandaloneSnapshotBuilder:
         output: list[str] = []
         for block in source_index.blocks:
             if block.kind == "header":
-                output.append(block.text)
+                append_snapshot_block(output, block.text)
 
         for index, entry in enumerate(entries):
             source_block = entry_blocks.get(final_origin_key(entry))
@@ -66,10 +73,10 @@ class StandaloneSnapshotBuilder:
                 continue
             if index in retained_indices:
                 assert source_block is not None
-                output.append(source_block.text)
+                append_snapshot_block(output, source_block.text)
                 stats.retained += 1
                 continue
-            output.append(self.print_generated([entry], options_map))
+            append_snapshot_block(output, self.print_generated([entry], options_map))
             if index in transformed_indices:
                 stats.transformed += 1
             else:

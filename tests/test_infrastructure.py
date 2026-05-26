@@ -228,6 +228,47 @@ class TestInfrastructureRoot:
             response.json()["detail"]["errors"][0]
         )
 
+
+    def test_infrastructure_root_separates_blocks_without_terminal_newline(self, tmp_path):
+        """Flattened includes must not concatenate adjacent source directives."""
+        from cashier_snapshot import StandaloneSnapshotBuilder
+        from cashier_snapshot.printer import print_generated_entries_for_pwa
+
+        root = tmp_path / "main.bean"
+        accounts = tmp_path / "accounts.bean"
+        cards = tmp_path / "cards.bean"
+
+        root.write_text(
+            'option "operating_currency" "RUB"\n'
+            'include "accounts.bean"\n'
+            'include "cards.bean"\n',
+            encoding="utf-8",
+        )
+        accounts.write_text(
+            "1970-01-01 open Expenses:FIXME RUB\n"
+            "; production-like trailing source comment without newline",
+            encoding="utf-8",
+        )
+        cards.write_text(
+            "1970-01-01 open Liabilities:CreditCards:Tinkoff RUB\n"
+            "2026-05-14 balance Liabilities:CreditCards:Tinkoff 0.00 RUB\n",
+            encoding="utf-8",
+        )
+
+        content, _ = StandaloneSnapshotBuilder(
+            root, print_generated=print_generated_entries_for_pwa
+        ).build()
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert "; production-like trailing source comment without newline\n1970-01-01 open Liabilities:CreditCards:Tinkoff RUB" in content
+        assert "; production-like trailing source comment without newline1970-01-01 open Liabilities:CreditCards:Tinkoff RUB" not in content
+        assert not reparsed_errors
+        assert any(
+            isinstance(entry, data.Open)
+            and entry.account == "Liabilities:CreditCards:Tinkoff"
+            for entry in reparsed_entries
+        )
+
     def test_canonicalization_preserves_programmatic_private_metadata_as_textual_metadata(self):
         """Programmatic metadata keys invalid in textual Beancount are renamed, not dropped."""
         test_bean_file = os.path.join(TEST_DIR, "materialized_custom_root.bean")
