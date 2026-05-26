@@ -147,6 +147,23 @@ class TestInfrastructureRoot:
         assert response.status_code == 422
         assert "Unsupported non-entry source directive" in response.json()["detail"]["errors"][0]
 
+    def test_infrastructure_root_rejects_repeated_included_source_directive(self, tmp_path):
+        """Repeated includes must not collapse origins and duplicate retained source silently."""
+        test_bean_file = tmp_path / "main.bean"
+        included = tmp_path / "accounts.bean"
+        test_bean_file.write_text(
+            'include "accounts.bean"\ninclude "accounts.bean"\n', encoding="utf-8"
+        )
+        included.write_text("2024-01-01 open Assets:Cash USD\n", encoding="utf-8")
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "Repeated included source directive is not safely exportable" in (
+            response.json()["detail"]["errors"][0]
+        )
+
     def test_infrastructure_root_rejects_plugin_without_export_policy(self, tmp_path):
         """Standalone export must not execute an unreviewed Python plugin."""
         test_bean_file = tmp_path / "main.bean"

@@ -46,6 +46,9 @@ class StandaloneSnapshotBuilder:
     def build(self) -> tuple[str, SnapshotStats]:
         source_index = SourceLedgerIndex.build(self.root_path)
         validate_source_preserving_plugins(source_index.plugin_names)
+        # Use the validated mapping: repeated includes would otherwise collapse
+        # identical origin keys and make retention incorrectly non-fail-closed.
+        entry_blocks = source_index.entry_blocks
 
         booked_entries, booking_errors, _ = load_booked_source_entries(self.root_path)
         if booking_errors:
@@ -64,11 +67,6 @@ class StandaloneSnapshotBuilder:
                 + "; ".join(str(error) for error in errors)
             )
 
-        entry_blocks = {
-            block.origin_key: block
-            for block in source_index.blocks
-            if block.origin_key is not None
-        }
         retained_indices, transformed_indices = classify_source_entries(
             entries, entry_blocks, booked_entries_by_origin
         )
