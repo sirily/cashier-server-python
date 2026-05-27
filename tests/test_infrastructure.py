@@ -147,6 +147,23 @@ class TestInfrastructureRoot:
         assert response.status_code == 422
         assert "Unsupported non-entry source directive" in response.json()["detail"]["errors"][0]
 
+    def test_infrastructure_root_rejects_repeated_included_source_directive(self, tmp_path):
+        """Repeated includes must not collapse origins and duplicate retained source silently."""
+        test_bean_file = tmp_path / "main.bean"
+        included = tmp_path / "accounts.bean"
+        test_bean_file.write_text(
+            'include "accounts.bean"\ninclude "accounts.bean"\n', encoding="utf-8"
+        )
+        included.write_text("2024-01-01 open Assets:Cash USD\n", encoding="utf-8")
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "Repeated included source directive is not safely exportable" in (
+            response.json()["detail"]["errors"][0]
+        )
+
     def test_infrastructure_root_rejects_plugin_without_export_policy(self, tmp_path):
         """Standalone export must not execute an unreviewed Python plugin."""
         test_bean_file = tmp_path / "main.bean"
@@ -226,6 +243,47 @@ class TestInfrastructureRoot:
         assert response.status_code == 422
         assert "cannot safely export transformed source directive" in (
             response.json()["detail"]["errors"][0]
+        )
+
+
+    def test_infrastructure_root_separates_blocks_without_terminal_newline(self, tmp_path):
+        """Flattened includes must not concatenate adjacent source directives."""
+        from cashier_snapshot import StandaloneSnapshotBuilder
+        from cashier_snapshot.printer import print_generated_entries_for_pwa
+
+        root = tmp_path / "main.bean"
+        accounts = tmp_path / "accounts.bean"
+        cards = tmp_path / "cards.bean"
+
+        root.write_text(
+            'option "operating_currency" "RUB"\n'
+            'include "accounts.bean"\n'
+            'include "cards.bean"\n',
+            encoding="utf-8",
+        )
+        accounts.write_text(
+            "1970-01-01 open Expenses:FIXME RUB\n"
+            "; production-like trailing source comment without newline",
+            encoding="utf-8",
+        )
+        cards.write_text(
+            "1970-01-01 open Liabilities:CreditCards:Tinkoff RUB\n"
+            "2026-05-14 balance Liabilities:CreditCards:Tinkoff 0.00 RUB\n",
+            encoding="utf-8",
+        )
+
+        content, _ = StandaloneSnapshotBuilder(
+            root, print_generated=print_generated_entries_for_pwa
+        ).build()
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+
+        assert "; production-like trailing source comment without newline\n1970-01-01 open Liabilities:CreditCards:Tinkoff RUB" in content
+        assert "; production-like trailing source comment without newline1970-01-01 open Liabilities:CreditCards:Tinkoff RUB" not in content
+        assert not reparsed_errors
+        assert any(
+            isinstance(entry, data.Open)
+            and entry.account == "Liabilities:CreditCards:Tinkoff"
+            for entry in reparsed_entries
         )
 
     def test_canonicalization_preserves_programmatic_private_metadata_as_textual_metadata(self):
@@ -443,6 +501,106 @@ class TestInfrastructureRoot:
             entry for entry in entries if not isinstance(entry, data.Pad)
         ]
         assert len(entries) - len(canonical_entries) == sum(isinstance(entry, data.Pad) for entry in entries)
+
+    def test_infrastructure_root_retains_fifo_booked_cost_spec(self, tmp_path):
+        """FIFO ``{}`` cost spec and inferred PnL must not cause 422, must keep source verbatim."""
+        root = tmp_path / "main.bean"
+        root.write_text(
+            'option "operating_currency" "USD"\n'
+            'option "booking_method" "FIFO"\n'
+            '\n'
+            "1970-01-01 commodity SPY\n"
+            '\n'
+            "1970-01-01 open Assets:MyStockBroker:SPY SPY\n"
+            "1970-01-01 open Assets:MyStockBroker:Cash USD\n"
+            "1970-01-01 open Expenses:MyBroker:Commissions USD\n"
+            "1970-01-01 open Income:MyBroker:PnL USD\n"
+            '\n'
+            '2024-04-11 * "Buy SPY"\n'
+            '  Assets:MyStockBroker:SPY 2 SPY {517.9 USD}\n'
+            '  Assets:MyStockBroker:Cash -1035.80 USD\n'
+            '\n'
+            '2024-06-17 * "Sell SPY"\n'
+            '  Assets:MyStockBroker:SPY -2 SPY {} @ 547 USD\n'
+            '  Assets:MyStockBroker:Cash 1090.99 USD\n'
+            '  Expenses:MyBroker:Commissions 3.01 USD\n'
+            '  Income:MyBroker:PnL\n',
+            encoding="utf-8",
+        )
+        main.BEAN_FILE = str(root)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 200
+        content = response.json()["content"]
+        assert "-2 SPY {} @ 547 USD" in content
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+        assert not reparsed_errors
+
+    def test_infrastructure_root_rejects_plugin_mutated_cost_behind_empty_fifo_source(
+        self, tmp_path, monkeypatch
+    ):
+        """A plugin cannot hide a changed booked lot behind retained raw ``{}`` text."""
+        from cashier_snapshot import builder as snapshot_builder
+
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:MyStockBroker:SPY SPY\n"
+            "2024-01-01 open Assets:MyStockBroker:Cash USD\n"
+            "2024-01-01 open Equity:Opening-Balances USD\n"
+            "2024-01-01 open Income:MyStockBroker:PnL USD\n\n"
+            '2024-04-11 * "Buy SPY"\n'
+            "  Assets:MyStockBroker:SPY  2 SPY {517.9 USD}\n"
+            "  Equity:Opening-Balances -1035.8 USD\n\n"
+            '2024-06-17 * "Sell SPY"\n'
+            "  Assets:MyStockBroker:SPY  -2 SPY {} @ 547 USD\n"
+            "  Assets:MyStockBroker:Cash 1094 USD\n"
+            "  Income:MyStockBroker:PnL -58.2 USD\n",
+            encoding="utf-8",
+        )
+        entries, errors, options_map = loader.load_file(str(test_bean_file))
+        assert not errors
+        sell = next(
+            entry
+            for entry in entries
+            if isinstance(entry, data.Transaction) and entry.narration == "Sell SPY"
+        )
+        changed_postings = list(sell.postings)
+        changed_postings[0] = changed_postings[0]._replace(
+            cost=data.Cost(Decimal("999"), "USD", None, "plugin-selected")
+        )
+        changed_sell = sell._replace(postings=changed_postings)
+        mutated_entries = [changed_sell if entry is sell else entry for entry in entries]
+        monkeypatch.setattr(
+            snapshot_builder.loader,
+            "load_file",
+            lambda _: (mutated_entries, [], options_map),
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 422
+        assert "cannot safely export transformed source directive" in (
+            response.json()["detail"]["errors"][0]
+        )
+
+    def test_is_empty_cost_spec_rejects_non_empty(self):
+        """A fully-specified CostSpec (e.g. {517.9 USD}) must not be treated as empty."""
+        from cashier_snapshot.reconcile import _is_empty_cost_spec
+        from beancount.core.number import MISSING
+
+        empty = data.CostSpec(
+            number_per=MISSING, number_total=None, currency=MISSING,
+            date=None, label=None, merge=False,
+        )
+        non_empty = data.CostSpec(
+            number_per=Decimal("517.9"), number_total=None, currency="USD",
+            date=None, label=None, merge=False,
+        )
+        assert _is_empty_cost_spec(empty)
+        assert not _is_empty_cost_spec(non_empty)
 
 
 class TestInfrastructure:

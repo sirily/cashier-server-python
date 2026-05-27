@@ -34,37 +34,70 @@ def _source_semantics(entry):
     return clean_entry
 
 
-def _posting_matches_source(source_posting, final_posting) -> bool:
-    if source_posting.account != final_posting.account:
-        return False
-    if source_posting.units is not MISSING and source_posting.units != final_posting.units:
-        return False
-    if source_posting.cost != final_posting.cost or source_posting.price != final_posting.price:
-        return False
-    if source_posting.flag != final_posting.flag:
-        return False
-    return _public_metadata(source_posting.meta) == _public_metadata(final_posting.meta)
+def _is_empty_cost_spec(cost) -> bool:
+    """Return True for an empty/unspecified CostSpec (``{}`` syntax).
+
+    The Python Beancount parser produces this form before FIFO booking
+    populates the concrete cost.  It is safe to retain the original source
+    text because no explicit cost semantics are erased.
+    """
+    return (
+        isinstance(cost, data.CostSpec)
+        and cost.number_per is MISSING
+        and cost.number_total is None
+        and cost.currency is MISSING
+        and cost.date is None
+        and cost.label is None
+        and cost.merge is False
+    )
 
 
-def _source_entry_is_retained(source_entry, final_entry) -> bool:
+def _posting_matches_booking_baseline(source_posting, booked_posting) -> bool:
+    """Allow only parser-to-core-booking changes that preserve raw source output.
+
+    Beancount resolves an empty cost spec (``{}``) during core booking.  That
+    change is safe to keep in raw source; it must not be used when comparing the
+    later plugin-materialized result with this booked baseline.
+    """
+    if source_posting.account != booked_posting.account:
+        return False
+    if source_posting.units is not MISSING and source_posting.units != booked_posting.units:
+        return False
+    if _is_empty_cost_spec(source_posting.cost):
+        if source_posting.price != booked_posting.price:
+            return False
+    elif source_posting.cost != booked_posting.cost or source_posting.price != booked_posting.price:
+        return False
+    if source_posting.flag != booked_posting.flag:
+        return False
+    return _public_metadata(source_posting.meta) == _public_metadata(booked_posting.meta)
+
+
+def _source_matches_booking_baseline(source_entry, booked_entry) -> bool:
+    """Whether raw source faithfully represents the core-booked baseline."""
     source = _source_semantics(source_entry)
-    final = _source_semantics(final_entry)
-    if isinstance(source, data.Transaction) and isinstance(final, data.Transaction):
+    booked = _source_semantics(booked_entry)
+    if isinstance(source, data.Transaction) and isinstance(booked, data.Transaction):
         return (
-            source.date == final.date
-            and source.flag == final.flag
-            and source.payee == final.payee
-            and source.narration == final.narration
-            and source.tags == final.tags
-            and source.links == final.links
-            and source.meta == final.meta
-            and len(source.postings) == len(final.postings)
+            source.date == booked.date
+            and source.flag == booked.flag
+            and source.payee == booked.payee
+            and source.narration == booked.narration
+            and source.tags == booked.tags
+            and source.links == booked.links
+            and source.meta == booked.meta
+            and len(source.postings) == len(booked.postings)
             and all(
-                _posting_matches_source(source_posting, final_posting)
-                for source_posting, final_posting in zip(source.postings, final.postings)
+                _posting_matches_booking_baseline(source_posting, booked_posting)
+                for source_posting, booked_posting in zip(source.postings, booked.postings)
             )
         )
-    return source == final
+    return source == booked
+
+
+def _booking_baseline_is_unchanged(booked_entry, final_entry) -> bool:
+    """Require exact semantic equality after booking so plugins cannot hide edits."""
+    return _source_semantics(booked_entry) == _source_semantics(final_entry)
 
 
 def _safe_printable_transform(source_block: SourceBlock, final_entry) -> bool:
@@ -91,8 +124,14 @@ def final_origin_key(entry) -> tuple[str, int, str]:
 def classify_source_entries(
     entries: list,
     entry_blocks: dict[tuple[str, int, str], SourceBlock],
+    booked_entries_by_origin: dict[tuple[str, int, str], object],
 ) -> tuple[set[int], set[int]]:
-    """Return materialized entry indices safe to retain verbatim or print changed."""
+    """Return materialized entry indices safe to retain verbatim or print changed.
+
+    Raw retention crosses two distinct boundaries: source syntax may differ from
+    Beancount's core-booked baseline (for example ``{}`` resolving to a FIFO
+    lot), but the later plugin-materialized entry must equal that baseline.
+    """
     final_by_origin: dict[tuple[str, int, str], list[tuple[int, object]]] = {}
     for index, entry in enumerate(entries):
         final_by_origin.setdefault(final_origin_key(entry), []).append((index, entry))
@@ -103,17 +142,21 @@ def classify_source_entries(
         if isinstance(source_block.entry, data.Pad):
             continue
         candidates = final_by_origin.get(origin_key, [])
+        booked_entry = booked_entries_by_origin.get(origin_key)
         retained_index = next(
             (
                 index
                 for index, final_entry in candidates
-                if _source_entry_is_retained(source_block.entry, final_entry)
+                if booked_entry is not None
+                and _source_matches_booking_baseline(source_block.entry, booked_entry)
+                and _booking_baseline_is_unchanged(booked_entry, final_entry)
             ),
             None,
         )
         if retained_index is not None:
             retained_indices.add(retained_index)
             continue
+
         transformed_index = next(
             (
                 index
@@ -126,9 +169,11 @@ def classify_source_entries(
             transformed_indices.add(transformed_index)
             continue
         raise SnapshotBuildError(
-            "Standalone snapshot cannot safely export transformed source "
-            f"directive: {source_block.relative_path}:{source_block.lineno} "
+            "Standalone snapshot cannot safely export transformed source directive: "
+            f"{source_block.relative_path}:{source_block.lineno} "
             f"({type(source_block.entry).__name__})"
         )
+
+    return retained_indices, transformed_indices
 
     return retained_indices, transformed_indices

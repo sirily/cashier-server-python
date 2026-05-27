@@ -129,6 +129,18 @@ option "plugin_processing_mode" "raw"
 
 Сопоставление должно использовать происхождение (`filename`, `lineno`, тип записи), а для преобразованных записей — правила конкретного плагина. Недопустимо угадывать соответствие только по дате, счёту или сумме.
 
+#### 5.3.1. Две границы для встроенного booking (`{}`)
+
+Некоторые исходные директивы меняются ещё до Python plugins: Beancount core booking разрешает пустой FIFO cost spec (`{}`) в выбранный concrete lot. Это не plugin transformation и при неизменённом последующем результате допустимо выводить исходным текстом, чтобы PWA самостоятельно выполнила то же booking.
+
+Reconciler поэтому сравнивает три представления:
+
+1. `raw source` из `SourceLedgerIndex`;
+2. `booked baseline`, полученный стандартными parse + `booking.book()` без выполнения transformations/plugins;
+3. `materialized final`, полученный полным `loader.load_file()` с plugins.
+
+Запись с `{}` может быть `retained` только если `raw source -> booked baseline` отличается исключительно допустимым core-booking completion **и** `booked baseline == materialized final` по пользовательской семантике. Если plugin после booking меняет выбранный cost, posting или транзакцию, исходный `{}` не может скрыть эту мутацию: применяется обычная transformed/fail-closed policy.
+
 ### 5.4. Реестр правил плагинов
 
 Нельзя считать, что все плагины только добавляют записи. Production workspace использует плагины, которые могут изменять, группировать, фильтровать или заменять исходные директивы.

@@ -154,6 +154,7 @@ reject(entry_or_source, reason)
 - Если итоговая запись ссылается на исходный блок, но её значимые поля изменились, она не может быть `retained`; требуется `transformed` policy.
 - Если исходная запись исчезла и policy не объясняет удаление, сборка падает.
 - Если появились неизвестные output entries, сборка падает.
+- Для parser/core-booking completion, в частности FIFO cost spec `{}`, дополнительно строить pre-plugin `booked baseline`: raw source разрешается сохранить только когда полный plugin result совпадает с этим baseline; изменение выбранного cost после booking должно быть rejected, а не скрыто исходным `{}`.
 
 ### Смысловые поля transaction
 
