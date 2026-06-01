@@ -48,14 +48,42 @@ The server runs on 0.0.0.0:3000, matching the Rust implementation.
 - `/shutdown` - Request server shutdown
 - `/infrastructure?file_path=config.bean` - Return a Beancount workspace file as `{ "content": "..." }`
 - `/infrastructure?file_path=prices/*.bean` - Return matching Beancount workspace files as `{ "files": [{ "path": "prices/2024.bean", "content": "..." }] }`
+- `/xact` - Stage 2 manual transaction writeback endpoint. Deployment exposes it as `/api/xact`; it accepts only Cashier-created completed transaction directives with `cashier_id` and writes only to the configured `BEANCOUNT_MANUAL_TRANSACTIONS_FILE`.
 
 CORS is enabled for all origins, similar to the Rust implementation.
+
+## Stage 2 manual transaction writeback
+
+Stage 2 is documented in `docs/architecture/stage-2-manual-transaction-writeback.md`.
+
+The intended deployment keeps the ledger read-only except for exactly one file:
+
+```yaml
+volumes:
+  - /mnt/raid4t/homelab/appdata/lazybean:/workspace:ro
+  - /mnt/raid4t/homelab/appdata/lazybean/manual_transactions.bean:/workspace/manual_transactions.bean:rw
+```
+
+`main.bean` includes:
+
+```beancount
+include "manual_transactions.bean"
+```
+
+Configure the fixed writeback target with:
+
+```text
+BEANCOUNT_MANUAL_TRANSACTIONS_FILE=/workspace/manual_transactions.bean
+```
+
+Do not configure a writable directory or client-controlled write path.
 
 ## Architecture documents
 
 - [`docs/architecture/standalone-pwa-ledger-snapshot.md`](docs/architecture/standalone-pwa-ledger-snapshot.md) — design for producing one source-preserving standalone `main.bean` for offline Cashier PWA sync.
 - [`docs/architecture/standalone-pwa-ledger-implementation-plan.md`](docs/architecture/standalone-pwa-ledger-implementation-plan.md) — staged implementation and verification plan.
 - [`docs/architecture/production-plugin-export-policy-audit.md`](docs/architecture/production-plugin-export-policy-audit.md) — required plugin behavior audit before changing the production export path.
+- [`docs/architecture/stage-2-manual-transaction-writeback.md`](docs/architecture/stage-2-manual-transaction-writeback.md) — implementation-ready Stage 2 contract for `/api/xact` writeback into the single writable `manual_transactions.bean` file.
 
 ## Development
 
