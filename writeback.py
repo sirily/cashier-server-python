@@ -74,32 +74,42 @@ def _normalize_entry(entry: data.Transaction, options_map: dict) -> str:
     return eprinter(entry)
 
 
-def _read_manual_transactions_file(filepath: str):
-    """Read and parse manual_transactions.bean.
-    Returns (entries, errors, options_map)."""
+def _read_manual_transactions_text(filepath: str) -> str:
+    """Read manual_transactions.bean as source text."""
     path = Path(filepath)
     if not path.exists():
-        return [], [], {}
-    return parser.parse_string(path.read_text(encoding="utf-8"))
+        return ""
+    return path.read_text(encoding="utf-8")
 
 
-def _build_candidate_content(
-    existing_entries: list,
+def _append_entries_to_source(
+    existing_content: str,
     valid_new_entries: list,
     options_map: dict,
 ) -> str:
-    """Build candidate manual_transactions.bean content from existing + new entries."""
+    """Append normalized new transactions without reprinting existing source."""
+    if not valid_new_entries:
+        return existing_content
+
     eprinter = EntryPrinter(
         dcontext=options_map.get("dcontext"),
     )
-    lines = []
-    for entry in existing_entries + valid_new_entries:
-        if not isinstance(entry, data.Transaction):
-            continue
-        text = eprinter(entry)
-        if text:
-            lines.append(text)
-    return "\n".join(lines) + "\n" if lines else ""
+    new_blocks = [
+        text
+        for entry in valid_new_entries
+        if isinstance(entry, data.Transaction)
+        for text in [eprinter(entry)]
+        if text
+    ]
+    if not new_blocks:
+        return existing_content
+
+    prefix = existing_content
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    if prefix.strip():
+        prefix += "\n"
+    return prefix + "\n\n".join(new_blocks) + "\n"
 
 
 def _write_file_crash_conscious(filepath: str, content: str) -> None:
@@ -172,6 +182,21 @@ def _validate_candidate_as_full_ledger(content: str, options_map: dict) -> list:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
 
+def _validation_error_texts_for_entry(
+    base_content: str,
+    entry: data.Transaction,
+    options_map: dict,
+) -> list:
+    """Validate one candidate entry in the full ledger context."""
+    candidate = _append_entries_to_source(base_content, [entry], options_map)
+    return _validate_candidate_as_full_ledger(candidate, options_map)
+
+
+def _unique_ids(ids: list[str]) -> list[str]:
+    """Return synchronized ids in first-seen order without duplicates."""
+    return list(dict.fromkeys(cid for cid in ids if cid))
+
+
 def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
     """Validate incoming transaction texts and commit valid ones.
 
@@ -188,7 +213,13 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
     wrote = False
 
     with _lock:
-        existing_manual_entries, _, _ = _read_manual_transactions_file(manual_file)
+        existing_content = _read_manual_transactions_text(manual_file)
+        existing_manual_entries, existing_errors, _ = parser.parse_string(existing_content)
+        if existing_errors:
+            raise RuntimeError(
+                "Existing manual transactions file has parse errors; refusing to write: "
+                + "; ".join(str(error) for error in existing_errors)
+            )
 
         existing_by_id = {}
         for entry in existing_manual_entries:
@@ -203,6 +234,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
         rejected = []
         valid_new = []
         seen_ids_in_request = {}
+        accepted_new_ids = []
 
         for text in transactions_texts:
             parsed_entries, parse_errors, _ = parser.parse_string(text)
@@ -270,7 +302,8 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                 normalized_prev = _normalize_entry(prev_entry, full_options)
                 normalized_cur = _normalize_entry(entry, full_options)
                 if normalized_prev == normalized_cur:
-                    synchronized.append(cashier_id)
+                    if cashier_id in accepted_new_ids:
+                        synchronized.append(cashier_id)
                 else:
                     rejected.append({
                         "cashier_id": cashier_id,
@@ -278,20 +311,33 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                     })
                 continue
 
+            validation_base = _append_entries_to_source(existing_content, valid_new, full_options)
+            validation_errors = _validation_error_texts_for_entry(
+                validation_base,
+                entry,
+                full_options,
+            )
+            if validation_errors:
+                rejected.append({
+                    "cashier_id": cashier_id,
+                    "reason": f"Transaction validation failed: {'; '.join(validation_errors)}",
+                })
+                continue
+
             seen_ids_in_request[cashier_id] = entry
-            synchronized.append(cashier_id)
             valid_new.append(entry)
+            accepted_new_ids.append(cashier_id)
 
         if not valid_new:
             return (
                 {
-                    "synchronized": [cid for cid in synchronized if cid],
+                    "synchronized": _unique_ids(synchronized),
                     "rejected": rejected,
                 },
                 wrote,
             )
 
-        candidate = _build_candidate_content(existing_manual_entries, valid_new, full_options)
+        candidate = _append_entries_to_source(existing_content, valid_new, full_options)
 
         validation_errors = _validate_candidate_as_full_ledger(candidate, full_options)
         if validation_errors:
@@ -301,7 +347,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
             })
             return (
                 {
-                    "synchronized": [cid for cid in synchronized if cid],
+                    "synchronized": _unique_ids(synchronized),
                     "rejected": rejected,
                 },
                 wrote,
@@ -313,10 +359,11 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
         )
         _write_file_crash_conscious(manual_file, candidate)
         wrote = True
+        synchronized.extend(accepted_new_ids)
 
     return (
         {
-            "synchronized": [cid for cid in synchronized if cid],
+            "synchronized": _unique_ids(synchronized),
             "rejected": rejected,
         },
         wrote,

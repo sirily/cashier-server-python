@@ -2,6 +2,8 @@
 
 import os
 from pathlib import Path
+import re
+import tomllib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -183,6 +185,54 @@ def test_mixed_batch_partial_success(configured_env):
     assert "batch-bad" not in content
 
 
+def test_mixed_batch_unbalanced_partial_success(configured_env):
+    """Valid transaction commits while unbalanced transaction is rejected."""
+    good = (
+        '2026-05-28 * "Good"\n'
+        '  cashier_id: "batch-good"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    bad = (
+        '2026-05-28 * "Bad unbalanced"\n'
+        '  cashier_id: "batch-unbalanced"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 4.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [good, bad]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["synchronized"] == ["batch-good"]
+    assert len(data["rejected"]) == 1
+    assert data["rejected"][0]["cashier_id"] == "batch-unbalanced"
+    assert "validation failed" in data["rejected"][0]["reason"].lower()
+
+    with open(configured_env) as f:
+        content = f.read()
+    assert "batch-good" in content
+    assert "batch-unbalanced" not in content
+
+
+def test_unbalanced_only_rejected_without_synchronized(configured_env):
+    """An unbalanced transaction must not be reported synchronized."""
+    bad = (
+        '2026-05-28 * "Bad unbalanced"\n'
+        '  cashier_id: "only-unbalanced"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 4.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [bad]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["synchronized"] == []
+    assert len(data["rejected"]) == 1
+    assert data["rejected"][0]["cashier_id"] == "only-unbalanced"
+
+    with open(configured_env) as f:
+        content = f.read()
+    assert content == ""
+
+
 def test_missing_cashier_id_rejected(configured_env):
     """Transaction without cashier_id is rejected."""
     text = (
@@ -213,17 +263,23 @@ def test_env_not_configured_returns_500(monkeypatch):
 
 def test_no_client_controlled_path(configured_env):
     """Request body must not contain a file path."""
+    malicious_path = Path(configured_env).with_name("malicious.bean")
     text = (
         '2026-05-28 * "Test"\n'
         '  cashier_id: "abc-123"\n'
         "  Assets:Cash -5.00 USD\n"
         "  Equity:Opening-Balances 5.00 USD"
     )
-    response = client.post("/xact", json={"transactions": [text], "file_path": "/some/path"})
+    response = client.post(
+        "/xact",
+        json={"transactions": [text], "file_path": str(malicious_path)},
+    )
     # Our Pydantic model ignores extra fields, so it should still work
     # but the file path in body must never be accepted.
     # The important part: no file_path parameter exists in the model.
     assert response.status_code == 200
+    assert not malicious_path.exists()
+    assert "abc-123" in Path(configured_env).read_text(encoding="utf-8")
 
 
 def test_balance_directive_rejected(configured_env):
@@ -315,3 +371,65 @@ def test_full_ledger_validation_uses_temp_copy(configured_env, monkeypatch):
     assert len(temp_copy_calls) >= 1, (
         "Expected load_file to be called on a temp copy (not the original BEANCOUNT_FILE)"
     )
+
+
+def test_existing_manual_parse_error_fails_closed(configured_env):
+    """Malformed existing manual file must not be overwritten."""
+    manual = Path(configured_env)
+    original = (
+        '2026-05-01 * "Broken"\n'
+        '  cashier_id: "broken-existing"\n'
+        "  this is not valid beancount syntax\n"
+    )
+    manual.write_text(original, encoding="utf-8")
+
+    text = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "abc-123"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [text]})
+    assert response.status_code == 500
+    assert "parse errors" in response.json()["detail"]
+    assert manual.read_text(encoding="utf-8") == original
+
+
+def test_append_preserves_existing_manual_source_comments(configured_env):
+    """Appending must not reprint or drop existing manual source text."""
+    manual = Path(configured_env)
+    existing = (
+        "; user comment that must survive\n"
+        "\n"
+        '2026-05-01 * "Old"\n'
+        '  cashier_id: "old-1"\n'
+        "  Assets:Cash -1.00 USD\n"
+        "  Equity:Opening-Balances 1.00 USD\n"
+    )
+    manual.write_text(existing, encoding="utf-8")
+
+    text = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "abc-123"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [text]})
+    assert response.status_code == 200
+    content = manual.read_text(encoding="utf-8")
+    assert content.startswith(existing)
+    assert "; user comment that must survive" in content
+    assert "abc-123" in content
+
+
+def test_packaging_includes_writeback_module():
+    """Wheel packaging must include runtime writeback.py module."""
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    only_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"]
+    assert "writeback.py" in only_include
+
+
+def test_docker_image_includes_writeback_module():
+    """Docker image must copy runtime writeback.py module."""
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    assert re.search(r"^COPY .*writeback\.py", dockerfile, re.MULTILINE)
