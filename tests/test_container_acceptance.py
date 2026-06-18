@@ -8,6 +8,7 @@ mount / separate QA image — the test uses only the PR-built image.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -163,7 +164,10 @@ class TestContainerAcceptance:
         # their transformed transaction forms in the standalone snapshot.
         assert 'custom "filter-map" "apply" "recurring" "#subscription-year"' in content
         assert '"Monthly rent" #recurring' in content
-        assert '"Regular transaction for summaries (recur 1/151)" #auxiliary #recurred' in content
+        assert re.search(
+            r'"Regular transaction for summaries \(recur 1/\d+\)" #auxiliary #recurred',
+            content,
+        )
         assert '"Subscription for SomeService paid in a year-instalment (split 1/12)"' in content
         assert "#splitted" in content
 

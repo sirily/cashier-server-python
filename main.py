@@ -7,11 +7,12 @@ import base64
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 import uvicorn
 from loguru import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 
@@ -364,6 +365,72 @@ async def shutdown():
         return {"message": "Server shut down"}
     else:
         return {"message": "Server not running"}
+
+
+def refresh_beancount_connection():
+    """Reload the in-memory Beancount connection so subsequent queries see new data."""
+    import beanquery
+    assert BEAN_FILE
+    app.state.connection = beanquery.connect("beancount:" + BEAN_FILE)
+    logger.info("Beancount connection refreshed after writeback")
+
+
+class XactRequest(BaseModel):
+    transactions: List[str]
+
+
+class XactRejected(BaseModel):
+    cashier_id: Optional[str] = None
+    reason: str
+
+
+class XactResponse(BaseModel):
+    synchronized: List[str]
+    rejected: List[XactRejected]
+
+
+@app.post("/xact")
+async def write_xact(request: XactRequest):
+    """
+    Accept Cashier-created manual transaction directives and append them to
+    the configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE.
+
+    This is NOT a general Beancount mutation API. Only completed ``*``
+    transaction directives with ``cashier_id`` metadata are accepted.
+
+    Returns synchronized cashier_ids and any rejections with reasons.
+    """
+    from writeback import validate_and_commit
+
+    manual_file = os.getenv("BEANCOUNT_MANUAL_TRANSACTIONS_FILE")
+    if not manual_file:
+        raise HTTPException(
+            status_code=500,
+            detail="BEANCOUNT_MANUAL_TRANSACTIONS_FILE is not configured",
+        )
+
+    try:
+        result, wrote = validate_and_commit(request.transactions)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if wrote:
+        try:
+            refresh_beancount_connection()
+        except Exception as exc:
+            logger.warning("Beancount connection refresh failed after writeback: {}", exc)
+
+    return XactResponse(
+        synchronized=result["synchronized"],
+        rejected=[
+            XactRejected(cashier_id=r["cashier_id"], reason=r["reason"])
+            for r in result["rejected"]
+        ],
+    )
 
 
 def main():

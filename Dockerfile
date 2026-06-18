@@ -13,7 +13,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
-COPY pyproject.toml uv.lock README.md main.py ./
+COPY pyproject.toml uv.lock README.md main.py writeback.py ./
 COPY cashier_snapshot ./cashier_snapshot
 RUN uv sync --frozen --no-dev
 
