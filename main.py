@@ -411,13 +411,18 @@ async def write_xact(request: XactRequest):
 
     try:
         result, wrote = validate_and_commit(request.transactions)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
     if wrote:
-        refresh_beancount_connection()
+        try:
+            refresh_beancount_connection()
+        except Exception as exc:
+            logger.warning("Beancount connection refresh failed after writeback: {}", exc)
 
     return XactResponse(
         synchronized=result["synchronized"],

@@ -112,14 +112,26 @@ def _append_entries_to_source(
     return prefix + "\n\n".join(new_blocks) + "\n"
 
 
-def _write_file_crash_conscious(filepath: str, content: str) -> None:
+def _write_file_crash_conscious(
+    filepath: str,
+    previous_content: str,
+    candidate_content: str,
+) -> None:
     """Crash-conscious single-file write.
 
-    Writes directly to the target file with flush and fsync.
-    No temp files are created in the ledger workspace.
+    Stage 2 only appends transactions. Preserve the existing bytes already on
+    disk and append just the validated suffix, so an open/write failure cannot
+    truncate the previous manual file content.
     """
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(content)
+    if not candidate_content.startswith(previous_content):
+        raise RuntimeError("Candidate write is not append-only; refusing to modify manual file")
+
+    suffix = candidate_content[len(previous_content):]
+    if not suffix:
+        return
+
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(suffix)
         f.flush()
         os.fsync(f.fileno())
 
@@ -226,6 +238,11 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
             if isinstance(entry, data.Transaction):
                 cid = _extract_cashier_id(entry)
                 if cid:
+                    if cid in existing_by_id:
+                        raise RuntimeError(
+                            "Existing manual transactions file contains duplicate "
+                            f"cashier_id {cid}; refusing to write"
+                        )
                     existing_by_id[cid] = entry
 
         full_entries, _, full_options = _load_full_ledger()
@@ -357,7 +374,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
             "Writing {} new transaction(s) to {}",
             len(valid_new), manual_file,
         )
-        _write_file_crash_conscious(manual_file, candidate)
+        _write_file_crash_conscious(manual_file, existing_content, candidate)
         wrote = True
         synchronized.extend(accepted_new_ids)
 

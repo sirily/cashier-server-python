@@ -336,6 +336,33 @@ def test_no_temp_files_in_ledger_workspace(configured_env, monkeypatch):
     assert response.json()["synchronized"] == ["abc-123"]
 
 
+def test_commit_opens_manual_file_in_append_mode(configured_env, monkeypatch):
+    """Writeback must not truncate the single mounted manual file before writing."""
+    import builtins
+
+    original_open = builtins.open
+    modes = []
+
+    def tracking_open(file, mode="r", *args, **kwargs):
+        if os.fspath(file) == configured_env:
+            modes.append(mode)
+        return original_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    text = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "abc-123"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [text]})
+    assert response.status_code == 200
+    assert response.json()["synchronized"] == ["abc-123"]
+    assert "a" in modes
+    assert "w" not in modes
+
+
 def test_full_ledger_validation_uses_temp_copy(configured_env, monkeypatch):
     """Prove /xact invokes full-ledger validation on a copied root,
     not only parser.parse_string(candidate)."""
@@ -393,6 +420,75 @@ def test_existing_manual_parse_error_fails_closed(configured_env):
     assert response.status_code == 500
     assert "parse errors" in response.json()["detail"]
     assert manual.read_text(encoding="utf-8") == original
+
+
+def test_existing_manual_duplicate_cashier_id_fails_closed(configured_env):
+    """Ambiguous existing idempotency state must not accept new writes."""
+    manual = Path(configured_env)
+    original = (
+        '2026-05-01 * "Old 1"\n'
+        '  cashier_id: "dup-existing"\n'
+        "  Assets:Cash -1.00 USD\n"
+        "  Equity:Opening-Balances 1.00 USD\n"
+        "\n"
+        '2026-05-02 * "Old 2"\n'
+        '  cashier_id: "dup-existing"\n'
+        "  Assets:Cash -2.00 USD\n"
+        "  Equity:Opening-Balances 2.00 USD\n"
+    )
+    manual.write_text(original, encoding="utf-8")
+
+    text = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "abc-123"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [text]})
+    assert response.status_code == 500
+    assert "duplicate cashier_id dup-existing" in response.json()["detail"]
+    assert manual.read_text(encoding="utf-8") == original
+
+
+def test_write_permission_error_returns_json_500(configured_env, monkeypatch):
+    """Filesystem write failures should be controlled JSON errors, not tracebacks."""
+    import writeback
+
+    def failing_write(filepath, previous_content, candidate_content):
+        raise PermissionError(13, "Permission denied", filepath)
+
+    monkeypatch.setattr(writeback, "_write_file_crash_conscious", failing_write)
+
+    text = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "abc-123"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [text]})
+    assert response.status_code == 500
+    assert "Permission denied" in response.json()["detail"]
+    assert Path(configured_env).read_text(encoding="utf-8") == ""
+
+
+def test_refresh_failure_after_write_still_returns_synchronized(configured_env, monkeypatch):
+    """A post-commit cache refresh failure must not make the client retry a committed write."""
+
+    def failing_refresh():
+        raise RuntimeError("reload failed")
+
+    monkeypatch.setattr(main, "refresh_beancount_connection", failing_refresh)
+
+    text = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "abc-123"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+    response = client.post("/xact", json={"transactions": [text]})
+    assert response.status_code == 200
+    assert response.json() == {"synchronized": ["abc-123"], "rejected": []}
+    assert "abc-123" in Path(configured_env).read_text(encoding="utf-8")
 
 
 def test_append_preserves_existing_manual_source_comments(configured_env):
