@@ -233,6 +233,92 @@ def test_unbalanced_only_rejected_without_synchronized(configured_env):
     assert content == ""
 
 
+def test_unique_identifierless_desktop_transaction_is_linked_not_appended(configured_env):
+    """An equivalent desktop record without an ID receives the PWA ID in place."""
+    manual = Path(configured_env)
+    original = (
+        '; desktop transfer comment\n'
+        '2026-05-28 * "Coffee"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD\n"
+    )
+    manual.write_text(original, encoding="utf-8")
+    incoming = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "linked-desktop-001"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+
+    response = client.post("/xact", json={"transactions": [incoming]})
+
+    assert response.status_code == 200
+    assert response.json() == {"synchronized": ["linked-desktop-001"], "rejected": []}
+    content = manual.read_text(encoding="utf-8")
+    assert content.count('2026-05-28 * "Coffee"') == 1
+    assert '  cashier_id: "linked-desktop-001"' in content
+    assert content.startswith('; desktop transfer comment\n')
+
+
+def test_identifierless_link_is_not_reported_synced_when_candidate_validation_fails(
+    configured_env, monkeypatch
+):
+    """A failed full-ledger check must preserve the source and reject the linked ID."""
+    import writeback
+
+    manual = Path(configured_env)
+    original = (
+        '2026-05-28 * "Coffee"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD\n"
+    )
+    manual.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(writeback, "_validate_candidate_as_full_ledger", lambda *_: ["ledger invalid"])
+    incoming = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "linked-validation-failure"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+
+    response = client.post("/xact", json={"transactions": [incoming]})
+
+    assert response.status_code == 200
+    assert response.json()["synchronized"] == []
+    assert manual.read_text(encoding="utf-8") == original
+
+
+def test_ambiguous_identifierless_desktop_transactions_are_rejected_without_mutation(configured_env):
+    """Several equivalent desktop records must not be linked or appended automatically."""
+    manual = Path(configured_env)
+    original = (
+        '2026-05-28 * "Coffee"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD\n\n"
+        '2026-05-28 * "Coffee"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD\n"
+    )
+    manual.write_text(original, encoding="utf-8")
+    incoming = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "ambiguous-desktop-001"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+
+    response = client.post("/xact", json={"transactions": [incoming]})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["synchronized"] == []
+    assert data["rejected"] == [{
+        "cashier_id": "ambiguous-desktop-001",
+        "reason": "Ambiguous existing transaction match; server file was not changed",
+    }]
+    assert manual.read_text(encoding="utf-8") == original
+
+
 def test_missing_cashier_id_rejected(configured_env):
     """Transaction without cashier_id is rejected."""
     text = (
