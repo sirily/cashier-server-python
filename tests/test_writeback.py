@@ -285,7 +285,31 @@ def test_identifierless_link_is_not_reported_synced_when_candidate_validation_fa
 
     assert response.status_code == 200
     assert response.json()["synchronized"] == []
+    assert response.json()["rejected"][0]["cashier_id"] == "linked-validation-failure"
     assert manual.read_text(encoding="utf-8") == original
+
+
+def test_identifierless_link_escapes_cashier_id_metadata(configured_env):
+    """A valid escaped Beancount ID remains valid after source insertion."""
+    manual = Path(configured_env)
+    manual.write_text(
+        '2026-05-28 * "Coffee"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD\n",
+        encoding="utf-8",
+    )
+    incoming = (
+        '2026-05-28 * "Coffee"\n'
+        '  cashier_id: "id-with-\\\"quote"\n'
+        "  Assets:Cash -5.00 USD\n"
+        "  Equity:Opening-Balances 5.00 USD"
+    )
+
+    response = client.post("/xact", json={"transactions": [incoming]})
+
+    assert response.status_code == 200
+    assert response.json() == {"synchronized": ['id-with-"quote'], "rejected": []}
+    assert 'cashier_id: "id-with-\\\"quote"' in manual.read_text(encoding="utf-8")
 
 
 def test_ambiguous_identifierless_desktop_transactions_are_rejected_without_mutation(configured_env):
@@ -314,7 +338,7 @@ def test_ambiguous_identifierless_desktop_transactions_are_rejected_without_muta
     assert data["synchronized"] == []
     assert data["rejected"] == [{
         "cashier_id": "ambiguous-desktop-001",
-        "reason": "Ambiguous existing transaction match; server file was not changed",
+        "reason": "Ambiguous existing transaction match; this transaction was not changed",
     }]
     assert manual.read_text(encoding="utf-8") == original
 

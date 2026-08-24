@@ -4,6 +4,7 @@ Accepts validated Cashier-created Beancount transaction directives and appends
 them to the configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE.
 """
 
+import json
 import os
 import shutil
 import threading
@@ -107,7 +108,7 @@ def _insert_cashier_ids_into_source(
             whitespace = next_line[: len(next_line) - len(next_line.lstrip())]
             if whitespace:
                 indent = whitespace
-        lines.insert(header_index + 1, f'{indent}cashier_id: "{cashier_id}"\n')
+        lines.insert(header_index + 1, f'{indent}cashier_id: {json.dumps(cashier_id)}\n')
     return "".join(lines)
 
 
@@ -388,7 +389,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
             if len(matching_desktop_entries) > 1:
                 rejected.append({
                     "cashier_id": cashier_id,
-                    "reason": "Ambiguous existing transaction match; server file was not changed",
+                    "reason": "Ambiguous existing transaction match; this transaction was not changed",
                 })
                 continue
 
@@ -423,10 +424,11 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
 
         validation_errors = _validate_candidate_as_full_ledger(candidate, full_options)
         if validation_errors:
-            rejected.append({
-                "cashier_id": None,
-                "reason": f"Candidate file validation failed: {'; '.join(validation_errors)}",
-            })
+            reason = f"Candidate file validation failed: {'; '.join(validation_errors)}"
+            for _, cashier_id in source_id_matches:
+                rejected.append({"cashier_id": cashier_id, "reason": reason})
+            for cashier_id in accepted_new_ids:
+                rejected.append({"cashier_id": cashier_id, "reason": reason})
             return (
                 {
                     "synchronized": _unique_ids(synchronized),
