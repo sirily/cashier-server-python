@@ -13,7 +13,7 @@ from .errors import SnapshotBuildError
 
 DIRECTIVE_START_RE = re.compile(
     r"^(?:"
-    r"\d{4}-\d{2}-\d{2}\s+|"
+    r"\d{4}-\d{2}-\d{2}(?=\s|[*!&#?%PSTC])\s*|"
     r"option\s+|include\s+|plugin\s+|"
     r"pushtag\s+|poptag\s+|pushmeta\s+|popmeta\s+"
     r")"

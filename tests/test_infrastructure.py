@@ -124,6 +124,38 @@ class TestInfrastructureRoot:
         assert '"Unit FX price remains unit price"' in content
         assert "Assets:MyFavouriteBank:Cash -10 GBP @ 1.23 USD" in content
 
+    def test_infrastructure_root_does_not_duplicate_transaction_without_space_before_flag(
+        self, tmp_path
+    ):
+        """A parser-valid compact transaction header is one standalone directive."""
+        test_bean_file = tmp_path / "main.bean"
+        test_bean_file.write_text(
+            'option "operating_currency" "USD"\n\n'
+            "2024-01-01 open Assets:Cash USD\n"
+            "2024-01-01 open Expenses:Food USD\n\n"
+            '2024-01-02 * "Previous"\n'
+            "  Assets:Cash -1 USD\n"
+            "  Expenses:Food 1 USD\n\n"
+            '2024-01-03* "Desktop compact" "DESKTOP-NOSPACE-REGRESSION"\n'
+            "  Assets:Cash -2 USD\n"
+            "  Expenses:Food 2 USD\n",
+            encoding="utf-8",
+        )
+        main.BEAN_FILE = str(test_bean_file)
+
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
+
+        assert response.status_code == 200
+        content = response.json()["content"]
+        assert content.count("DESKTOP-NOSPACE-REGRESSION") == 1
+        reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
+        assert not reparsed_errors
+        assert sum(
+            isinstance(entry, data.Transaction)
+            and entry.narration == "DESKTOP-NOSPACE-REGRESSION"
+            for entry in reparsed_entries
+        ) == 1
+
     def test_infrastructure_root_rejects_scoped_source_directive_until_preservation_is_implemented(
         self, tmp_path
     ):
