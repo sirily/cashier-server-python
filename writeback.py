@@ -4,6 +4,7 @@ Accepts validated Cashier-created Beancount transaction directives and appends
 them to the configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE.
 """
 
+import json
 import os
 import shutil
 import threading
@@ -74,6 +75,43 @@ def _normalize_entry(entry: data.Transaction, options_map: dict) -> str:
     return eprinter(entry)
 
 
+def _normalize_entry_without_cashier_id(entry: data.Transaction, options_map: dict) -> str:
+    """Normalize user-visible transaction content independently of its sync ID."""
+    meta = {
+        key: value
+        for key, value in (entry.meta or {}).items()
+        if key not in {"cashier_id", "filename", "lineno"}
+    }
+    return _normalize_entry(entry._replace(meta=meta), options_map)
+
+
+def _insert_cashier_ids_into_source(
+    source: str,
+    matches: list[tuple[data.Transaction, str]],
+) -> str:
+    """Insert IDs after matched transaction headers without reprinting source."""
+    lines = source.splitlines(keepends=True)
+    for entry, cashier_id in sorted(
+        matches,
+        key=lambda match: int((match[0].meta or {}).get("lineno", 0)),
+        reverse=True,
+    ):
+        lineno = (entry.meta or {}).get("lineno")
+        if not isinstance(lineno, int) or lineno < 1 or lineno > len(lines):
+            raise RuntimeError("Existing transaction has no usable source location")
+        header_index = lineno - 1
+        if not lines[header_index].lstrip().startswith(("20", "19")):
+            raise RuntimeError("Existing transaction source location does not point to a header")
+        indent = "  "
+        if header_index + 1 < len(lines):
+            next_line = lines[header_index + 1]
+            whitespace = next_line[: len(next_line) - len(next_line.lstrip())]
+            if whitespace:
+                indent = whitespace
+        lines.insert(header_index + 1, f'{indent}cashier_id: {json.dumps(cashier_id)}\n')
+    return "".join(lines)
+
+
 def _read_manual_transactions_text(filepath: str) -> str:
     """Read manual_transactions.bean as source text."""
     path = Path(filepath)
@@ -119,19 +157,23 @@ def _write_file_crash_conscious(
 ) -> None:
     """Crash-conscious single-file write.
 
-    Stage 2 only appends transactions. Preserve the existing bytes already on
-    disk and append just the validated suffix, so an open/write failure cannot
-    truncate the previous manual file content.
+    Append when possible. Linking a unique identifier-less desktop record
+    requires a source-preserving in-place rewrite of this one mounted file.
     """
-    if not candidate_content.startswith(previous_content):
-        raise RuntimeError("Candidate write is not append-only; refusing to modify manual file")
-
-    suffix = candidate_content[len(previous_content):]
-    if not suffix:
+    if candidate_content == previous_content:
         return
 
-    with open(filepath, "a", encoding="utf-8") as f:
-        f.write(suffix)
+    if candidate_content.startswith(previous_content):
+        with open(filepath, "a", encoding="utf-8") as f:
+            f.write(candidate_content[len(previous_content):])
+            f.flush()
+            os.fsync(f.fileno())
+        return
+
+    with open(filepath, "r+", encoding="utf-8") as f:
+        f.seek(0)
+        f.write(candidate_content)
+        f.truncate()
         f.flush()
         os.fsync(f.fileno())
 
@@ -234,6 +276,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
             )
 
         existing_by_id = {}
+        existing_without_id = []
         for entry in existing_manual_entries:
             if isinstance(entry, data.Transaction):
                 cid = _extract_cashier_id(entry)
@@ -244,12 +287,15 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                             f"cashier_id {cid}; refusing to write"
                         )
                     existing_by_id[cid] = entry
+                else:
+                    existing_without_id.append(entry)
 
         full_entries, _, full_options = _load_full_ledger()
 
         synchronized = []
         rejected = []
         valid_new = []
+        source_id_matches = []
         seen_ids_in_request = {}
         accepted_new_ids = []
 
@@ -328,6 +374,25 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                     })
                 continue
 
+            normalized_entry = _normalize_entry_without_cashier_id(entry, full_options)
+            matching_desktop_entries = [
+                existing
+                for existing in existing_without_id
+                if existing.date == entry.date
+                and all(existing is not matched for matched, _ in source_id_matches)
+                and _normalize_entry_without_cashier_id(existing, full_options) == normalized_entry
+            ]
+            if len(matching_desktop_entries) == 1:
+                source_id_matches.append((matching_desktop_entries[0], cashier_id))
+                seen_ids_in_request[cashier_id] = entry
+                continue
+            if len(matching_desktop_entries) > 1:
+                rejected.append({
+                    "cashier_id": cashier_id,
+                    "reason": "Ambiguous existing transaction match; this transaction was not changed",
+                })
+                continue
+
             validation_base = _append_entries_to_source(existing_content, valid_new, full_options)
             validation_errors = _validation_error_texts_for_entry(
                 validation_base,
@@ -345,7 +410,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
             valid_new.append(entry)
             accepted_new_ids.append(cashier_id)
 
-        if not valid_new:
+        if not valid_new and not source_id_matches:
             return (
                 {
                     "synchronized": _unique_ids(synchronized),
@@ -354,14 +419,16 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                 wrote,
             )
 
-        candidate = _append_entries_to_source(existing_content, valid_new, full_options)
+        candidate = _insert_cashier_ids_into_source(existing_content, source_id_matches)
+        candidate = _append_entries_to_source(candidate, valid_new, full_options)
 
         validation_errors = _validate_candidate_as_full_ledger(candidate, full_options)
         if validation_errors:
-            rejected.append({
-                "cashier_id": None,
-                "reason": f"Candidate file validation failed: {'; '.join(validation_errors)}",
-            })
+            reason = f"Candidate file validation failed: {'; '.join(validation_errors)}"
+            for _, cashier_id in source_id_matches:
+                rejected.append({"cashier_id": cashier_id, "reason": reason})
+            for cashier_id in accepted_new_ids:
+                rejected.append({"cashier_id": cashier_id, "reason": reason})
             return (
                 {
                     "synchronized": _unique_ids(synchronized),
@@ -376,6 +443,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
         )
         _write_file_crash_conscious(manual_file, existing_content, candidate)
         wrote = True
+        synchronized.extend(cashier_id for _, cashier_id in source_id_matches)
         synchronized.extend(accepted_new_ids)
 
     return (
