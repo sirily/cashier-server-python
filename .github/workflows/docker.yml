@@ -69,7 +69,7 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: cashier-server-acceptance:test
+          tags: cashier-auth-server:e2e
           cache-from: type=gha
 
       - name: Install acceptance test Node dependencies
