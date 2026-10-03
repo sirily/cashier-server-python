@@ -9,6 +9,7 @@ mount / separate QA image — the test uses only the PR-built image.
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -19,9 +20,10 @@ from urllib.parse import quote
 import pytest
 
 FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "plugin_ledger")
-IMAGE_TAG = "cashier-server-acceptance:test"
-CONTAINER_NAME = "cashier-server-acceptance-test"
-HOST_PORT = 3099
+IMAGE_TAG = "cashier-auth-server:e2e"
+CONTAINER_NAME = f"cashier-auth-acceptance-{os.getpid()}-{secrets.token_hex(4)}"
+HOST_PORT = None
+AUTH_CREDENTIAL = secrets.token_urlsafe(32)
 
 _DOCKER_SKIP_REASON = "Set DOCKER_ACCEPTANCE=1 to run container acceptance tests"
 pytestmark = pytest.mark.skipif(
@@ -44,18 +46,27 @@ def _ensure_image():
 
 
 def _run_container():
+    global HOST_PORT
     subprocess.run(
         [
-            "docker", "run", "--rm", "-d",
+            "docker", "run", "-d",
             "--name", CONTAINER_NAME,
-            "-p", f"{HOST_PORT}:3000",
+            "-p", "127.0.0.1::3000",
             "-v", f"{FIXTURE_DIR}:/workspace:ro",
             "-e", "BEANCOUNT_FILE=/workspace/main.bean",
+            "-e", "CASHIER_API_TOKEN",
             IMAGE_TAG,
         ],
         check=True,
         capture_output=True,
+        env={**os.environ, "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
     )
+    binding = subprocess.run(
+        ["docker", "port", CONTAINER_NAME, "3000/tcp"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert binding.startswith("127.0.0.1:"), binding
+    HOST_PORT = int(binding.rsplit(":", 1)[1])
 
 
 def _wait_for_health(timeout=60):
@@ -80,22 +91,26 @@ def _container_logs():
         return None
 
 
-def _get(path, params=None):
+def _get(path, params=None, authorization=f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None):
     url = f"http://127.0.0.1:{HOST_PORT}{path}"
     if params:
         qs = "&".join(f"{k}={quote(v)}" for k, v in params.items())
         url = f"{url}?{qs}"
-    resp = urllib.request.urlopen(url, timeout=10)
-    return resp.status, resp.read().decode("utf-8")
+    headers = {} if authorization is None else {"Authorization": authorization}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, headers=headers, method=method, data=data)
+    try:
+        resp = urllib.request.urlopen(request, timeout=10)
+    except urllib.error.HTTPError as error:
+        resp = error
+    with resp:
+        return resp.status, resp.read().decode("utf-8")
 
 
 def _stop_container():
     subprocess.run(["docker", "stop", CONTAINER_NAME], capture_output=True, timeout=30)
     subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True, timeout=30)
-
-
-def _remove_image():
-    subprocess.run(["docker", "rmi", "-f", IMAGE_TAG], capture_output=True, timeout=30)
 
 
 class TestContainerAcceptance:
@@ -123,12 +138,41 @@ class TestContainerAcceptance:
         assert body == '"pong"'
 
     def test_health_ok(self):
-        status, body = _get("/health")
+        status, body = _get("/health", authorization=None)
         assert status == 200
         data = json.loads(body)
         assert data["ok"] is True
         assert data["beancount_file_configured"] is True
         assert data["beancount_loaded"] is True
+
+    @pytest.mark.parametrize("authorization", [None, "Bearer wrong-token", "Basic wrong-token", "Bearer "])
+    @pytest.mark.parametrize("path,method,data", [
+        ("/ping", "GET", None),
+        ("/infrastructure?file_path=main.bean", "GET", None),
+        ("/xact", "POST", b'{"transactions": []}'),
+        ("/shutdown", "GET", None),
+    ])
+    def test_invalid_auth_rejected(self, authorization, path, method, data):
+        status, body = _get(path, authorization=authorization, method=method, data=data)
+        assert status == 401
+        assert json.loads(body) == {"detail": "Invalid or missing API token"}
+        assert AUTH_CREDENTIAL not in body
+
+    def test_missing_token_container_refuses_startup(self):
+        name = f"{CONTAINER_NAME}-missing-token"
+        try:
+            result = subprocess.run(
+                ["docker", "run", "--name", name, "--network", "none",
+                 "-v", f"{FIXTURE_DIR}:/workspace:ro",
+                 "-e", "BEANCOUNT_FILE=/workspace/main.bean", IMAGE_TAG],
+                capture_output=True, text=True, timeout=30,
+            )
+            assert result.returncode == 1, result.stdout + result.stderr
+            assert "CASHIER_API_TOKEN must be configured" in result.stderr
+            assert "Uvicorn running" not in result.stdout + result.stderr
+            assert AUTH_CREDENTIAL not in result.stdout + result.stderr
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
 
     def test_infrastructure_root_returns_http_200_not_422(self):
         status, body = _get("/infrastructure", params={"file_path": "main.bean"})
@@ -205,7 +249,7 @@ class TestContainerAcceptance:
         script = os.path.join(os.path.dirname(__file__), "acceptance", "parse_with_rustledger.mjs")
         result = subprocess.run(
             ["node", script],
-            env={**os.environ, "PORT": str(HOST_PORT)},
+            env={**os.environ, "PORT": str(HOST_PORT), "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
             text=True,
             capture_output=True,
             timeout=30,
@@ -316,7 +360,7 @@ class TestContainerAcceptance:
         result = subprocess.run(
             ["node", script],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "PORT": str(HOST_PORT)},
+            env={**os.environ, "PORT": str(HOST_PORT), "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
         )
         if result.returncode != 0:
             raise AssertionError(

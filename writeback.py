@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from beancount.core import data
+from beancount.core import data, display_context
 from beancount.parser import parser
 from beancount.parser.printer import EntryPrinter
 from beancount import loader
@@ -68,9 +68,9 @@ def _validate_accounts(entry: data.Transaction, existing_entries: list) -> list:
 
 def _normalize_entry(entry: data.Transaction, options_map: dict) -> str:
     """Normalize a transaction to stable text using Beancount's printer."""
-    eprinter = EntryPrinter(
-        dcontext=options_map.get("dcontext"),
-    )
+    # An empty context uses fixed-point Decimal formatting without rounding.
+    # Ledger display precision is presentation-only, never storage precision.
+    eprinter = EntryPrinter(dcontext=display_context.DisplayContext())
     return eprinter(entry)
 
 
@@ -91,9 +91,9 @@ def _append_entries_to_source(
     if not valid_new_entries:
         return existing_content
 
-    eprinter = EntryPrinter(
-        dcontext=options_map.get("dcontext"),
-    )
+    # An empty context uses fixed-point Decimal formatting without rounding.
+    # Ledger display precision is presentation-only, never storage precision.
+    eprinter = EntryPrinter(dcontext=display_context.DisplayContext())
     new_blocks = [
         text
         for entry in valid_new_entries

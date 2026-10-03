@@ -9,8 +9,56 @@ from fastapi.testclient import TestClient
 import main
 
 
-client = TestClient(main.app)
+main.CASHIER_API_TOKEN = "test-api-token"
+client = TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@pytest.fixture
+def configured_api_token(monkeypatch):
+    monkeypatch.setattr(main, "CASHIER_API_TOKEN", "test-api-token")
+    return {"Authorization": "Bearer test-api-token"}
+
+
+def test_api_rejects_missing_bearer_token(configured_api_token):
+    response = client.get("/ping", headers={"Authorization": ""})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_api_rejects_invalid_bearer_token(configured_api_token):
+    response = client.get("/ping", headers={"Authorization": "Bearer wrong-token"})
+
+    assert response.status_code == 401
+
+
+def test_api_accepts_valid_bearer_token(configured_api_token):
+    response = client.get("/ping", headers=configured_api_token)
+
+    assert response.status_code == 200
+    assert response.json() == "pong"
+
+
+def test_health_remains_available_without_bearer_token(configured_api_token):
+    response = client.get("/health", headers={"Authorization": ""})
+
+    assert response.status_code == 200
+
+
+def test_api_fails_closed_when_token_is_not_configured(monkeypatch):
+    monkeypatch.setattr(main, "CASHIER_API_TOKEN", "")
+
+    response = client.get("/ping")
+
+    assert response.status_code == 503
+
+
+def test_server_refuses_to_start_without_token(monkeypatch):
+    monkeypatch.setattr(main, "CASHIER_API_TOKEN", "")
+
+    with pytest.raises(RuntimeError, match="CASHIER_API_TOKEN must be configured"):
+        main.main()
 
 
 @pytest.fixture

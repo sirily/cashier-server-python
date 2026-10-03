@@ -10,7 +10,8 @@ from fastapi.testclient import TestClient
 
 import main
 
-client = TestClient(main.app)
+main.CASHIER_API_TOKEN = "test-api-token"
+client = TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # A simple valid ledger with accounts that tests can reference
