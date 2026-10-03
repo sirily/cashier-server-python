@@ -27,8 +27,8 @@ class ReprValue:
     def __str__(self):
         return "<repr value>"
 
-
-client = TestClient(main.app)
+main.CASHIER_API_TOKEN = "test-api-token"
+client = TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
 
 
 # Get the directory of the test files

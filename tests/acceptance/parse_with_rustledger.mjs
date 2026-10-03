@@ -18,7 +18,19 @@ if (!PORT) {
 
 const url = `http://127.0.0.1:${PORT}/infrastructure?file_path=main.bean`;
 
-http.get(url, async (res) => {
+const token = process.env.CASHIER_API_TOKEN;
+if (!token) {
+  console.error("CASHIER_API_TOKEN environment variable is required");
+  process.exit(1);
+}
+
+http.get(url, { headers: { Authorization: ['Bearer', token].join(' ') } }, async (res) => {
+  if (res.statusCode !== 200) {
+    console.error(`Snapshot request failed with HTTP ${res.statusCode}`);
+    res.resume();
+    process.exitCode = 1;
+    return;
+  }
   let body = "";
   res.on("data", (chunk) => (body += chunk));
   res.on("end", async () => {

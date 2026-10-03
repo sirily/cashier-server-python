@@ -4,14 +4,16 @@ FastAPI implementation
 """
 
 import base64
+import hmac
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional, List
 import uvicorn
 from loguru import logger
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -20,6 +22,7 @@ load_dotenv()
 BEAN_FILE = os.getenv("BEANCOUNT_FILE")
 CASHIER_SSL_KEY = os.getenv("CASHIER_SSL_KEY")
 CASHIER_SSL_CERT = os.getenv("CASHIER_SSL_CERT")
+CASHIER_API_TOKEN = os.getenv("CASHIER_" + "API_TOKEN", "").strip()
 CASHIER_ENABLE_SHUTDOWN = os.getenv("CASHIER_ENABLE_SHUTDOWN", "false").lower() in {"1", "true", "yes", "on"}
 CASHIER_CORS_ORIGINS = [
     origin.strip()
@@ -45,6 +48,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    """Require one deployment-scoped bearer token for application API routes."""
+    if request.method == "OPTIONS" or request.url.path == "/health":
+        return await call_next(request)
+
+    if not CASHIER_API_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Cashier API token is not configured"},
+        )
+
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    valid = (
+        separator == " "
+        and scheme.lower() == "bearer"
+        and bool(token)
+        and hmac.compare_digest(token, CASHIER_API_TOKEN)
+    )
+    if not valid:
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+            content={"detail": "Invalid or missing API token"},
+        )
+
+    return await call_next(request)
 
 
 @app.get("/")
@@ -437,6 +470,9 @@ def main():
     """
     Entry point for the executable script.
     """
+    if not CASHIER_API_TOKEN:
+        raise RuntimeError("CASHIER_API_TOKEN must be configured")
+
     logger.info("Starting Cashier Server on 0.0.0.0:3000")
 
     if BEAN_FILE:
