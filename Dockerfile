@@ -21,8 +21,7 @@ RUN groupadd --system app \
     && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
     && chown -R app:app /app
 
-ENV BEANCOUNT_FILE=/workspace/main.bean \
-    CASHIER_ENABLE_SHUTDOWN=false
+ENV BEANCOUNT_FILE=/workspace/main.bean
 
 EXPOSE 3000
 

@@ -137,6 +137,28 @@ class TestContainerAcceptance:
         assert status == 200
         assert body == '"pong"'
 
+    @pytest.mark.parametrize("path", ["/hello", "/shutdown"])
+    def test_removed_endpoints_return_404(self, path):
+        status, body = _get(path)
+        assert status == 404
+        assert json.loads(body) == {"detail": "Not Found"}
+
+    def test_missing_beancount_file_container_refuses_startup(self):
+        name = f"{CONTAINER_NAME}-missing-beancount-file"
+        try:
+            result = subprocess.run(
+                ["docker", "run", "--name", name, "--network", "none",
+                 "-e", "BEANCOUNT_FILE=", "-e", "CASHIER_API_TOKEN", IMAGE_TAG],
+                check=False, capture_output=True, text=True, timeout=30,
+                env={**os.environ, "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
+            )
+            assert result.returncode == 1, result.stdout + result.stderr
+            assert "BEANCOUNT_FILE must be configured" in result.stderr
+            assert "Uvicorn running" not in result.stdout + result.stderr
+            assert AUTH_CREDENTIAL not in result.stdout + result.stderr
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
+
     def test_health_ok(self):
         status, body = _get("/health", authorization=None)
         assert status == 200
@@ -150,7 +172,7 @@ class TestContainerAcceptance:
         ("/ping", "GET", None),
         ("/infrastructure?file_path=main.bean", "GET", None),
         ("/xact", "POST", b'{"transactions": []}'),
-        ("/shutdown", "GET", None),
+        ("/reload", "GET", None),
     ])
     def test_invalid_auth_rejected(self, authorization, path, method, data):
         status, body = _get(path, authorization=authorization, method=method, data=data)

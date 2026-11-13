@@ -1,12 +1,10 @@
 """
-Cashier Server - Ledger-cli REST server for Cashier PWA
+Cashier Server - Beancount synchronization server for Cashier PWA
 FastAPI implementation
 """
 
-import base64
 import hmac
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,7 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
 
 # Exception traces must not copy ledger data or request locals into server logs.
 logger.configure(handlers=[{"sink": sys.stderr, "diagnose": False, "backtrace": False}])
@@ -27,7 +24,7 @@ BEAN_FILE = os.getenv("BEANCOUNT_FILE")
 CASHIER_SSL_KEY = os.getenv("CASHIER_SSL_KEY")
 CASHIER_SSL_CERT = os.getenv("CASHIER_SSL_CERT")
 CASHIER_API_TOKEN = os.getenv("CASHIER_" + "API_TOKEN", "").strip()
-CASHIER_ENABLE_SHUTDOWN = os.getenv("CASHIER_ENABLE_SHUTDOWN", "false").lower() in {"1", "true", "yes", "on"}
+
 CASHIER_CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CASHIER_CORS_ORIGINS", "*").split(",")
@@ -37,7 +34,7 @@ CASHIER_CORS_ORIGINS = [
 # Create a FastAPI instance
 app = FastAPI(
     title="Cashier Server",
-    description="Ledger-cli REST server for Cashier PWA",
+    description="Beancount synchronization server for Cashier PWA",
     version="0.14.0",
 )
 
@@ -86,53 +83,11 @@ async def require_api_token(request: Request, call_next):
 
 @app.get("/")
 async def index(query: str | None = None):
-    """Index. Based on the settings, it uses Ledger or Beancount for data."""
+    """Execute a BQL query against the configured Beancount book."""
     if not query:
         return {"error": "No query provided"}
 
-    if BEAN_FILE:
-        return await beancount(query)
-    else:
-        return await ledger(query)
-
-
-# @app.get("/")
-async def ledger(query: str | None = None):
-    """
-    Execute a ledger command and return the result.
-
-    Args:
-        query: The ledger command to execute
-
-    Returns:
-        The result of the ledger command
-    """
-    if not query:
-        return {"error": "No query provided"}
-
-    logger.info(f"Ledger query: {query}")
-
-    try:
-        # Execute the ledger command
-        process = await run_in_threadpool(
-            subprocess.run,
-            ["ledger"] + query.split(),
-            capture_output=True,
-            text=True,
-            check=True,
-            encoding="utf-8",
-        )
-
-        if process.returncode == 0:
-            output = process.stdout
-        else:
-            output = process.stderr
-
-        result = output.splitlines()
-        return result
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error executing ledger command: {e}")
-        return {"error": str(e), "stderr": e.stderr}
+    return await beancount(query)
 
 
 def preload_beancount_data():
@@ -142,7 +97,7 @@ def preload_beancount_data():
     import beanquery
 
     if not BEAN_FILE:
-        raise ValueError("BEAN_FILE environment variable not set")
+        raise ValueError("BEANCOUNT_FILE must be configured")
 
     logger.info(f"Loading Beancount file: {BEAN_FILE}")
 
@@ -162,16 +117,14 @@ async def beancount(query: str | None = None):
         The result of the beancount command
     """
     import beancount
-    # import beanquery
 
     if not BEAN_FILE:
-        raise ValueError("BEAN_FILE environment variable not set")
+        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE must be configured")
     if not query:
         return {"error": "No query provided"}
 
     logger.info(f"Beancount query: {query}")
 
-    # connection = beanquery.connect("beancount:" + BEAN_FILE)
     connection = app.state.connection
     cursor = connection.execute(query)
     result = cursor.fetchall()
@@ -199,22 +152,12 @@ def reload_beancount_data():
     """
     import beanquery
 
+    if not BEAN_FILE:
+        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE must be configured")
+
     logger.info("Reloading Beancount data")
-    assert BEAN_FILE
     # Just recreate the connection.
     app.state.connection = beanquery.connect("beancount:" + BEAN_FILE)
-
-@app.get("/hello")
-async def hello_img():
-    """
-    Return a base64-encoded image.
-    """
-    # This is a placeholder - you would need to replace with your actual image
-    image = await run_in_threadpool(Path("hello.png").read_bytes)
-    encoded_string = base64.b64encode(image).decode("utf-8")
-
-    return encoded_string
-
 
 @app.get("/ping")
 async def ping():
@@ -279,7 +222,6 @@ def is_root_infrastructure_path(full_file_path: Path) -> bool:
     if not BEAN_FILE:
         return False
     return full_file_path.resolve() == Path(BEAN_FILE).resolve()
-
 
 
 def render_materialized_root_book() -> str:
@@ -388,23 +330,6 @@ async def infrastructure_file(file_path: str):
     return {"content": content}
 
 
-@app.get("/shutdown")
-async def shutdown():
-    """
-    Shutdown the server.
-    """
-    logger.info("Shutdown requested")
-
-    if not CASHIER_ENABLE_SHUTDOWN:
-        raise HTTPException(status_code=403, detail="Shutdown endpoint is disabled")
-
-    if hasattr(app.state, "server"):
-        app.state.server.should_exit = True
-        return {"message": "Server shut down"}
-    else:
-        return {"message": "Server not running"}
-
-
 def refresh_beancount_connection():
     """Reload the in-memory Beancount connection so subsequent queries see new data."""
     import beanquery
@@ -480,12 +405,12 @@ def main():
 
     logger.info("Starting Cashier Server on 0.0.0.0:3000")
 
-    if BEAN_FILE:
-        # pre-load beancount data
-        app.state.connection = preload_beancount_data()
+    if not BEAN_FILE:
+        raise RuntimeError("BEANCOUNT_FILE must be configured")
 
-    # Create a server instance that can be referenced
-    # uvicorn.run(app, host="0.0.0.0", port=3000)
+    app.state.connection = preload_beancount_data()
+
+
     ssl_keyfile = ssl_certfile = None
     if CASHIER_SSL_KEY and CASHIER_SSL_CERT:
         ssl_keyfile, ssl_certfile = CASHIER_SSL_KEY, CASHIER_SSL_CERT
@@ -496,8 +421,6 @@ def main():
     )
     server = uvicorn.Server(config)
 
-    # Store the server instance in the app state
-    app.state.server = server
 
     server.run()
 

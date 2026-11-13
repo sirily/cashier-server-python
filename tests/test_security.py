@@ -67,7 +67,7 @@ def configured_test_book(monkeypatch):
     test_bean_file = os.path.join(TEST_DIR, "book.bean")
     monkeypatch.setenv("BEANCOUNT_FILE", test_bean_file)
     monkeypatch.setattr(main, "BEAN_FILE", test_bean_file)
-    monkeypatch.setattr(main, "CASHIER_ENABLE_SHUTDOWN", False)
+
     return test_bean_file
 
 
@@ -252,7 +252,9 @@ def test_infrastructure_does_not_call_subprocess_for_file_path(configured_test_b
     assert glob_response.status_code == 200
 
 
-def test_shutdown_is_disabled_by_default(configured_test_book):
-    response = client.get("/shutdown")
+@pytest.mark.parametrize("path", ["/hello", "/shutdown"])
+def test_removed_endpoints_are_not_available(configured_api_token, path):
+    response = client.get(path, headers=configured_api_token)
 
-    assert response.status_code == 403
+    assert response.status_code == 404
+    assert path not in main.app.openapi()["paths"]

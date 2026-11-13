@@ -287,12 +287,15 @@ def test_include_directive_rejected(configured_env):
 
 
 def test_no_temp_files_in_ledger_workspace(configured_env, monkeypatch):
-    """Assert commit does not create temp files in the ledger workspace.
-
-    Monkeypatches tempfile.mkstemp to fail: the corrected implementation must
-    not call mkstemp(dir=ledger_workspace) for the commit path.
-    """
+    """Only the manual file may change; no extra workspace paths may remain."""
     import tempfile as tf
+
+    manual_file = Path(configured_env)
+    workspace = manual_file.parent
+    before = {
+        path.relative_to(workspace): path.read_bytes() if path.is_file() else None
+        for path in workspace.rglob("*")
+    }
 
     def failing_mkstemp(*args, **kwargs):
         raise RuntimeError("mkstemp should not be called during commit")
@@ -308,6 +311,16 @@ def test_no_temp_files_in_ledger_workspace(configured_env, monkeypatch):
     response = client.post("/xact", json={"transactions": [text]})
     assert response.status_code == 200
     assert response.json()["synchronized"] == ["abc-123"]
+    after = {
+        path.relative_to(workspace): path.read_bytes() if path.is_file() else None
+        for path in workspace.rglob("*")
+    }
+    assert after.keys() == before.keys()
+    manual_relative = manual_file.relative_to(workspace)
+    assert after[manual_relative] != before[manual_relative]
+    assert {path: content for path, content in after.items() if path != manual_relative} == {
+        path: content for path, content in before.items() if path != manual_relative
+    }
 
 
 def test_commit_opens_manual_file_in_append_mode(configured_env, monkeypatch):

@@ -31,7 +31,6 @@ class SourceBlock:
     kind: str
     text: str
     entry: object | None = None
-    plugin_name: str | None = None
 
     @property
     def origin_key(self) -> tuple[str, int, str] | None:
@@ -157,7 +156,6 @@ class SourceLedgerIndex:
                             lineno,
                             "plugin",
                             text,
-                            plugin_name=plugin_name,
                         )
                     )
                     continue
