@@ -98,6 +98,14 @@ jobs:
         if: ${{ always() && !cancelled() && steps.node.outcome == 'success' && steps.python.outcome == 'success' }}
         run: node --test scripts/release-tests.mjs
 
+      - name: Lint Python with Ruff
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run --locked ruff check .
+
+      - name: Type-check Python with Basedpyright
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run --locked basedpyright --warnings
+
       - name: Run Python tests
         if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --locked pytest --timeout=180 -v

@@ -42,10 +42,19 @@ editor-launched Python tasks with `uv run`. Restart Serena separately if it has
 cached the old environment. Activating a terminal alone does not change the
 editor's already running language server.
 
-A passing `uv run pytest` is not a clean lint/type-check result: Ruff and
-Basedpyright can report existing style or typing problems independently. Fix
-those deliberately; do not hide them by disabling diagnostics or importing
-packages from the system Python.
+Ruff 0.17.5 and Basedpyright 1.40.2 are pinned in the dev dependencies. Zed can
+use their executables from the selected `.venv`, and CI runs the same checks on
+Python 3.12 and 3.13:
+
+```sh
+uv run --locked ruff check .
+uv run --locked basedpyright --warnings
+uv run --locked pytest
+```
+
+Lint, type-check, and test results are independent gates. Fix diagnostics rather
+than disabling rules or importing packages from the system Python. Ruff recognizes
+`loguru.logger` so exception-handling checks understand the application's logging.
 
 ## MCP clients
 

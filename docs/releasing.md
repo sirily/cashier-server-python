@@ -66,7 +66,7 @@ Publication builds a **fresh final image from the squash commit**, not by promot
 | Gate | Coverage |
 | --- | --- |
 | Workflow syntax | Checksum-verified Actionlint 1.7.7 with ShellCheck; root workflows checked using an isolated empty configuration |
-| Python 3.12 and 3.13 | Locked dependency installation, version validation, Node release regression tests, and the Python test suite |
+| Python 3.12 and 3.13 | Locked dependency installation, version validation, Ruff linting, Basedpyright type checking, Node release regression tests, and the Python test suite |
 | Wheel | Build on both Python versions; verify application modules, package name/version, and the `cashier-server = main:main` entry point |
 | Production platforms | Non-pushing Docker builds for both `linux/amd64` and `linux/arm64` |
 | Container acceptance | Build the production Dockerfile; exercise authentication, runtime plugins, read-only ledger fixtures, and RustLedger snapshot parsing |
@@ -79,6 +79,8 @@ uv python install
 uv sync --locked
 node scripts/release.mjs validate-version
 node --test scripts/release-tests.mjs
+uv run --locked ruff check .
+uv run --locked basedpyright --warnings
 uv run --locked pytest --timeout=180 -v
 uv build --wheel
 ```
