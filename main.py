@@ -34,7 +34,7 @@ CASHIER_CORS_ORIGINS = [
 app = FastAPI(
     title="Cashier Server",
     description="Ledger-cli REST server for Cashier PWA",
-    version="0.13.0",
+    version="0.14.0",
 )
 
 # Configure CORS. In production the app is expected to be served same-origin
