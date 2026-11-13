@@ -1,43 +1,16 @@
 """Tests for Stage 2 manual transaction writeback endpoint and logic."""
 
 import os
-from pathlib import Path
 import re
 import tomllib
+from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 import main
 
 main.CASHIER_API_TOKEN = "test-api-token"
 client = TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
-TEST_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# A simple valid ledger with accounts that tests can reference
-LEDGER_WITH_ACCOUNTS = os.path.join(TEST_DIR, "materialized_root.bean")
-
-
-@pytest.fixture
-def configured_env(monkeypatch, tmp_path):
-    """Set BEANCOUNT_FILE and BEANCOUNT_MANUAL_TRANSACTIONS_FILE
-    with a proper ledger structure where main.bean includes manual_transactions.bean."""
-    # Read the base ledger content (has account opens, no failing plugins)
-    base = Path(LEDGER_WITH_ACCOUNTS).read_text()
-
-    # Create main.bean that includes manual_transactions.bean
-    main_bean = tmp_path / "main.bean"
-    main_bean.write_text(base.strip() + '\ninclude "manual_transactions.bean"\n', encoding="utf-8")
-
-    # Create empty manual_transactions.bean inside the same ledger root
-    manual_file = tmp_path / "manual_transactions.bean"
-    manual_file.write_text("")
-
-    monkeypatch.setenv("BEANCOUNT_FILE", str(main_bean))
-    monkeypatch.setattr(main, "BEAN_FILE", str(main_bean))
-    monkeypatch.setenv("BEANCOUNT_MANUAL_TRANSACTIONS_FILE", str(manual_file))
-
-    yield str(manual_file)
 
 
 def test_normal_append(configured_env):

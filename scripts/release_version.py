@@ -6,7 +6,6 @@ import sys
 import tomllib
 from pathlib import Path
 
-
 VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 
 

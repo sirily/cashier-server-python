@@ -9,8 +9,8 @@ from decimal import Decimal
 from io import StringIO
 
 from beancount.core import amount, data, inventory
+from beancount.core.position import Cost, CostSpec
 from beancount.parser import printer
-
 
 TEXTUAL_METADATA_KEY_RE = re.compile(r"^[a-z][A-Za-z0-9_-]*$")
 
@@ -37,7 +37,7 @@ def canonicalize_metadata_value_for_pwa(value):
         return value.value
     if isinstance(value, (str, Decimal, int, float, datetime.date, amount.Amount, bool)) or value is None:
         return value
-    if isinstance(value, (inventory.Inventory, data.Cost, data.CostSpec)):
+    if isinstance(value, (inventory.Inventory, Cost, CostSpec)):
         return str(value)
     return str(value)
 
@@ -93,7 +93,7 @@ def print_materialized_entries(entries: list, options_map: dict) -> str:
 
     for entry in entries:
         entry_type = type(entry)
-        if entry_type in (printer.data.Transaction, printer.data.Commodity) or entry_type is not previous_type:
+        if entry_type in (data.Transaction, data.Commodity) or entry_type is not previous_type:
             output.write("\n")
             previous_type = entry_type
         output.write(eprinter(entry))

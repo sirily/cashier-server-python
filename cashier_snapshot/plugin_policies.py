@@ -2,7 +2,6 @@
 
 from .errors import SnapshotBuildError
 
-
 # Each allowed plugin is still constrained by reconciliation: unchanged entries
 # are emitted from source text, generated entries are printed, and transformed
 # source entries may only use the builder's guarded transformed-output policy.

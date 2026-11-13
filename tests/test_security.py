@@ -2,12 +2,12 @@
 
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import main
-
 
 main.CASHIER_API_TOKEN = "test-api-token"
 client = TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
@@ -83,9 +83,9 @@ def test_infrastructure_returns_file_inside_ledger_directory(configured_test_boo
     response = client.get("/infrastructure", params={"file_path": "config.bean"})
 
     assert response.status_code == 200
-    assert response.json()["content"] == open(
-        os.path.join(TEST_DIR, "config.bean"), encoding="utf-8"
-    ).read()
+    assert response.json()["content"] == Path(TEST_DIR, "config.bean").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_infrastructure_rejects_parent_directory_traversal(configured_test_book):
@@ -154,7 +154,7 @@ def test_infrastructure_glob_ignores_symlinks(configured_test_book, tmp_path, mo
 def test_infrastructure_rejects_encoded_traversal_and_does_not_exfiltrate(configured_test_book):
     """Encoded ../ must not read files outside the ledger workspace."""
     outside_path = os.path.abspath(os.path.join(TEST_DIR, "..", "pyproject.toml"))
-    outside_content = open(outside_path, encoding="utf-8").read()
+    outside_content = Path(outside_path).read_text(encoding="utf-8")
 
     response = client.get("/infrastructure?file_path=..%2Fpyproject.toml")
 
@@ -165,7 +165,7 @@ def test_infrastructure_rejects_encoded_traversal_and_does_not_exfiltrate(config
 def test_infrastructure_glob_cannot_exfiltrate_parent_files(configured_test_book):
     """Glob patterns with traversal must not enumerate/read parent directories."""
     outside_path = os.path.abspath(os.path.join(TEST_DIR, "..", "pyproject.toml"))
-    outside_content = open(outside_path, encoding="utf-8").read()
+    outside_content = Path(outside_path).read_text(encoding="utf-8")
 
     response = client.get("/infrastructure?file_path=..%2F*.toml")
 

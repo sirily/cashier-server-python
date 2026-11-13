@@ -3,11 +3,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from beancount.core import display_context
+from beancount.core import data, display_context
 from beancount.parser import parser
 
 import writeback
-from tests.test_writeback import client, configured_env
+from tests.test_writeback import client
 
 
 def transaction(number="7.25"):
@@ -24,7 +24,13 @@ def test_post_preserves_decimal_amounts(configured_env):
     assert response.json() == {"synchronized": ["decimal-regression"], "rejected": []}
     entries, errors, _ = parser.parse_string(Path(configured_env).read_text())
     assert not errors
-    assert [p.units.number for p in entries[0].postings] == [Decimal("-7.25"), Decimal("7.25")]
+    entry = entries[0]
+    assert isinstance(entry, data.Transaction)
+    numbers = []
+    for posting in entry.postings:
+        assert posting.units is not None
+        numbers.append(posting.units.number)
+    assert numbers == [Decimal("-7.25"), Decimal("7.25")]
     before = Path(configured_env).read_bytes()
     assert client.post("/xact", json={"transactions": [transaction()]}).json()["rejected"] == []
     assert Path(configured_env).read_bytes() == before
@@ -43,7 +49,7 @@ def test_decimal_difference_is_conflict(configured_env, same_batch):
 @pytest.mark.parametrize("annotation", ["", " {2.123456789 USD}", " {2.123456789 # 0.000000123 USD}", " @ 2.123456789 USD"])
 def test_append_and_canonicalization_preserve_all_precision(annotation):
     context = display_context.DisplayContext()
-    context.update(Decimal("7"), "USD")
+    context.update(Decimal(7), "USD")
     text = (
         '2026-05-28 * "Precision"\n'
         '  cashier_id: "precision"\n'
@@ -52,11 +58,17 @@ def test_append_and_canonicalization_preserve_all_precision(annotation):
     )
     entries, errors, _ = parser.parse_string(text)
     assert not errors
+    entry = entries[0]
+    assert isinstance(entry, data.Transaction)
     options = {"dcontext": context}
-    for rendered in (writeback._normalize_entry(entries[0], options), writeback._append_entries_to_source("; untouched\n", entries, options)):
+    for rendered in (writeback._normalize_entry(entry, options), writeback._append_entries_to_source("; untouched\n", entries, options)):
         reparsed, errors, _ = parser.parse_string(rendered)
         assert not errors
-        assert [p._replace(meta=None) for p in reparsed[0].postings] == [p._replace(meta=None) for p in entries[0].postings]
+        reparsed_entry = reparsed[0]
+        assert isinstance(reparsed_entry, data.Transaction)
+        assert [p._replace(meta=None) for p in reparsed_entry.postings] == [p._replace(meta=None) for p in entry.postings]
     changed, errors, _ = parser.parse_string(text.replace("123456789", "123456788"))
     assert not errors
-    assert writeback._normalize_entry(entries[0], options) != writeback._normalize_entry(changed[0], options)
+    changed_entry = changed[0]
+    assert isinstance(changed_entry, data.Transaction)
+    assert writeback._normalize_entry(entry, options) != writeback._normalize_entry(changed_entry, options)
