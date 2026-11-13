@@ -17,3 +17,10 @@ wheels/
 
 # Node.js dependencies for acceptance tests
 tests/acceptance/node_modules/
+
+# Local code-intelligence indexes and machine-specific state
+.gitnexus/
+.serena/cache/
+.serena/logs/
+.serena/memories/
+.serena/project.local.yml

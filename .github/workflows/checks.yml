@@ -1,0 +1,275 @@
+name: Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# PR updates may supersede checks; separate release runs must keep their own gates.
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  workflows:
+    name: Workflow syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install verified Actionlint
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            --connect-timeout 10 --max-time 60 \
+            --output "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            '023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757' \
+            "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          shellcheck --version
+
+      - name: Validate root GitHub Actions workflows
+        env:
+          SHELLCHECK_OPTS: --norc
+        run: |
+          # Do not load lint configuration or helper executables from PR content.
+          printf '{}\n' > "$RUNNER_TEMP/actionlint.yaml"
+          "$RUNNER_TEMP/actionlint" -config-file "$RUNNER_TEMP/actionlint.yaml" \
+            -pyflakes= .github/workflows/*.yml
+
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    env:
+      CI: 'true'
+      UV_PYTHON: ${{ matrix.python }}
+      DOCKER_ACCEPTANCE: 'false'
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.15.0'
+          package-manager-cache: false
+
+      - name: Set up uv
+        id: uv
+        if: ${{ always() && !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: '0.13.8'
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+
+      - name: Install Python
+        id: python
+        if: ${{ always() && !cancelled() && steps.uv.outcome == 'success' }}
+        run: uv python install
+
+      - name: Install locked Python dependencies
+        id: install
+        if: ${{ always() && !cancelled() && steps.python.outcome == 'success' }}
+        run: uv sync --locked
+
+      - name: Validate package, lockfile, API, and release-branch versions
+        if: ${{ always() && !cancelled() && steps.node.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: node scripts/release.mjs validate-version
+
+      - name: Test release planning and publication safeguards
+        if: ${{ always() && !cancelled() && steps.node.outcome == 'success' && steps.python.outcome == 'success' }}
+        run: node --test scripts/release-tests.mjs
+
+      - name: Lint Python with Ruff
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run --locked ruff check .
+
+      - name: Type-check Python with Basedpyright
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run --locked basedpyright --warnings
+
+      - name: Run Python tests
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run --locked pytest --timeout=180 -v
+
+      - name: Build wheel
+        id: wheel
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv build --wheel --out-dir "$RUNNER_TEMP/wheels"
+
+      - name: Verify wheel contents and version
+        if: ${{ always() && !cancelled() && steps.wheel.outcome == 'success' }}
+        run: |
+          uv run --locked python - <<'PY'
+          import configparser
+          import email
+          import os
+          from pathlib import Path
+          import tomllib
+          import zipfile
+
+          wheels = list((Path(os.environ['RUNNER_TEMP']) / 'wheels').glob('*.whl'))
+          assert len(wheels) == 1, f'Expected one wheel, got {wheels}'
+          project = tomllib.loads(Path('pyproject.toml').read_text())['project']
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+              required = {'main.py', 'writeback.py', 'cashier_snapshot/__init__.py'}
+              required.update(str(path) for path in Path('cashier_snapshot').rglob('*.py'))
+              assert required <= names, f'Missing application modules: {required - names}'
+              metadata_files = [name for name in names if name.endswith('.dist-info/METADATA')]
+              assert len(metadata_files) == 1, f'Unexpected metadata: {metadata_files}'
+              metadata = email.message_from_bytes(wheel.read(metadata_files[0]))
+              assert metadata['Name'] == project['name'], metadata['Name']
+              assert metadata['Version'] == project['version'], metadata['Version']
+              entrypoints = configparser.ConfigParser()
+              entrypoints.read_string(wheel.read(metadata_files[0].replace('METADATA', 'entry_points.txt')).decode())
+              assert entrypoints['console_scripts']['cashier-server'] == 'main:main'
+          print(f'Verified {wheels[0].name}: application modules, metadata, and entry point')
+          PY
+
+  container:
+    name: Container acceptance and dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+      UV_PYTHON: '3.13'
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.15.0'
+          package-manager-cache: false
+
+      - name: Set up uv
+        id: uv
+        if: ${{ always() && !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: '0.13.8'
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Install Python
+        id: python
+        if: ${{ always() && !cancelled() && steps.uv.outcome == 'success' }}
+        run: uv python install
+
+      - name: Install locked Python dependencies
+        id: install_python
+        if: ${{ always() && !cancelled() && steps.python.outcome == 'success' }}
+        run: uv sync --locked
+
+      - name: Install locked acceptance dependencies
+        id: install_node
+        if: ${{ always() && !cancelled() && steps.node.outcome == 'success' }}
+        working-directory: tests/acceptance
+        run: npm ci
+
+      - name: Build production image for acceptance and auditing
+        id: build
+        if: ${{ always() && !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 20
+        run: docker build --tag cashier-auth-server:e2e .
+
+      - name: Run container and RustLedger acceptance tests
+        if: ${{ always() && !cancelled() && steps.install_python.outcome == 'success' && steps.install_node.outcome == 'success' && steps.build.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          DOCKER_ACCEPTANCE: 'true'
+          CASHIER_ACCEPTANCE_SKIP_BUILD: 'true'
+        run: uv run --locked pytest tests/test_container_acceptance.py --timeout=180 -v
+
+      - name: Install pinned Trivy
+        id: trivy
+        if: ${{ always() && !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: 'v0.76.2'
+          cache: false
+
+      - name: Audit Python, Node, and production image dependencies
+        if: ${{ always() && !cancelled() && steps.install_python.outcome == 'success' && steps.install_node.outcome == 'success' && steps.build.outcome == 'success' && steps.trivy.outcome == 'success' }}
+        timeout-minutes: 10
+        run: uv run --locked python scripts/audit.py --image cashier-auth-server:e2e
+
+  multiarch:
+    name: Production build (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build production image without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          outputs: type=cacheonly
+
+  gate:
+    name: Required checks
+    if: ${{ always() }}
+    needs: [workflows, python, container, multiarch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all check jobs to succeed
+        env:
+          WORKFLOWS_RESULT: ${{ needs.workflows.result }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
+          MULTIARCH_RESULT: ${{ needs.multiarch.result }}
+        run: |
+          printf 'Workflow syntax: %s\nPython: %s\nContainer and audit: %s\nMultiarch build: %s\n' \
+            "$WORKFLOWS_RESULT" "$PYTHON_RESULT" "$CONTAINER_RESULT" "$MULTIARCH_RESULT"
+          test "$WORKFLOWS_RESULT" = success
+          test "$PYTHON_RESULT" = success
+          test "$CONTAINER_RESULT" = success
+          test "$MULTIARCH_RESULT" = success

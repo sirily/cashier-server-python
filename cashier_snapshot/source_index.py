@@ -10,7 +10,6 @@ from beancount.parser import parser
 
 from .errors import SnapshotBuildError
 
-
 DIRECTIVE_START_RE = re.compile(
     r"^(?:"
     r"\d{4}-\d{2}-\d{2}(?=\s|[*!&#?%PSTC])\s*|"
@@ -52,7 +51,7 @@ class SourceLedgerIndex:
         self._active_stack: list[Path] = []
 
     @classmethod
-    def build(cls, root_path: Path) -> "SourceLedgerIndex":
+    def build(cls, root_path: Path) -> SourceLedgerIndex:
         index = cls(root_path)
         index._index_file(index.root_path)
         return index
@@ -170,12 +169,7 @@ class SourceLedgerIndex:
                     )
                     continue
 
-                if (
-                    stripped.startswith("option ")
-                    or not stripped
-                    or stripped.startswith(";")
-                    or stripped.startswith("*")
-                ):
+                if stripped.startswith(("option ", ";", "*")) or not stripped:
                     self.blocks.append(
                         SourceBlock(path, relative_path, lineno, "header", text)
                     )

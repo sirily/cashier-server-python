@@ -85,13 +85,13 @@ def _container_logs():
     try:
         return subprocess.run(
             ["docker", "logs", CONTAINER_NAME],
-            capture_output=True, text=True, timeout=10,
+            check=True, capture_output=True, text=True, timeout=10,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
-def _get(path, params=None, authorization=f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None):
+def _get(path, params=None, authorization: str | None = f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None):
     url = f"http://127.0.0.1:{HOST_PORT}{path}"
     if params:
         qs = "&".join(f"{k}={quote(v)}" for k, v in params.items())
@@ -109,8 +109,8 @@ def _get(path, params=None, authorization=f"Bearer {AUTH_CREDENTIAL}", method="G
 
 
 def _stop_container():
-    subprocess.run(["docker", "stop", CONTAINER_NAME], capture_output=True, timeout=30)
-    subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True, timeout=30)
+    subprocess.run(["docker", "stop", CONTAINER_NAME], check=False, capture_output=True, timeout=30)
+    subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], check=False, capture_output=True, timeout=30)
 
 
 class TestContainerAcceptance:
@@ -165,14 +165,14 @@ class TestContainerAcceptance:
                 ["docker", "run", "--name", name, "--network", "none",
                  "-v", f"{FIXTURE_DIR}:/workspace:ro",
                  "-e", "BEANCOUNT_FILE=/workspace/main.bean", IMAGE_TAG],
-                capture_output=True, text=True, timeout=30,
+                check=False, capture_output=True, text=True, timeout=30,
             )
             assert result.returncode == 1, result.stdout + result.stderr
             assert "CASHIER_API_TOKEN must be configured" in result.stderr
             assert "Uvicorn running" not in result.stdout + result.stderr
             assert AUTH_CREDENTIAL not in result.stdout + result.stderr
         finally:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
 
     def test_infrastructure_root_returns_http_200_not_422(self):
         status, body = _get("/infrastructure", params={"file_path": "main.bean"})
@@ -249,6 +249,7 @@ class TestContainerAcceptance:
         script = os.path.join(os.path.dirname(__file__), "acceptance", "parse_with_rustledger.mjs")
         result = subprocess.run(
             ["node", script],
+            check=False,
             env={**os.environ, "PORT": str(HOST_PORT), "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
             text=True,
             capture_output=True,
@@ -279,8 +280,9 @@ class TestContainerAcceptance:
 
         # The valuation plugin produces entries with metadata like asset_class.
         # Check that commas and key: value pairs parse correctly.
-        from beancount.parser import parser
         import tempfile
+
+        from beancount.parser import parser
         with tempfile.NamedTemporaryFile(mode="w", suffix=".bean", delete=False) as f:
             f.write(content)
             tmp_path = f.name
@@ -304,6 +306,7 @@ class TestContainerAcceptance:
         content = json.loads(body)["content"]
 
         import tempfile
+
         from beancount.core import data
         from beancount.parser import parser
 
@@ -345,7 +348,7 @@ class TestContainerAcceptance:
         script = "; ".join(f"import {m}" for m in modules)
         result = subprocess.run(
             ["docker", "run", "--rm", IMAGE_TAG, "python", "-c", script],
-            capture_output=True, text=True, timeout=30,
+            check=False, capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
             raise AssertionError(
@@ -359,7 +362,7 @@ class TestContainerAcceptance:
         )
         result = subprocess.run(
             ["node", script],
-            capture_output=True, text=True, timeout=30,
+            check=False, capture_output=True, text=True, timeout=30,
             env={**os.environ, "PORT": str(HOST_PORT), "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
         )
         if result.returncode != 0:

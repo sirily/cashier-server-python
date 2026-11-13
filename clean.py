@@ -2,8 +2,8 @@
 Clean up the build directories.
 '''
 # clean.py
-import shutil
 import os
+import shutil
 
 for folder in ["dist", "build"]:
     shutil.rmtree(folder, ignore_errors=True)

@@ -6,6 +6,11 @@ __pycache__
 .ruff_cache
 .mypy_cache
 .vscode
+.zed
+.serena
+.gitnexus
+.gitnexusignore
+.mcp.json
 *.pyc
 *.pyo
 *.pyd

@@ -8,15 +8,17 @@ import os
 from decimal import Decimal
 
 import pytest
+from beancount import loader
+from beancount.core import amount, data, inventory
+from beancount.core.position import Cost, CostSpec
+from beancount.parser import parser
+from fastapi.testclient import TestClient
+
 import main
 from cashier_snapshot.printer import (
     canonicalize_materialized_entries_for_pwa,
     print_materialized_entries,
 )
-from beancount import loader
-from beancount.core import amount, data, inventory
-from beancount.parser import parser
-from fastapi.testclient import TestClient
 
 
 class MetadataEnum(enum.Enum):
@@ -474,15 +476,20 @@ class TestInfrastructureRoot:
             '''2024-01-01 * "Posting metadata"\n  Assets:Cash  1 USD\n  Equity:Opening-Balances -1 USD\n'''
         )
         assert not errors
-        posting = entries[0].postings[0]._replace(meta={"pwa_post": "original", "_post": "renamed", "foo.bar": 3})
-        entry = entries[0]._replace(postings=[posting, entries[0].postings[1]])
+        transaction = entries[0]
+        assert isinstance(transaction, data.Transaction)
+        posting = transaction.postings[0]._replace(meta={"pwa_post": "original", "_post": "renamed", "foo.bar": 3})
+        entry = transaction._replace(postings=[posting, transaction.postings[1]])
 
         canonical_entries = canonicalize_materialized_entries_for_pwa([entry])
         content = print_materialized_entries(canonical_entries, options_map)
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
 
         assert not reparsed_errors
-        reparsed_posting_meta = reparsed_entries[0].postings[0].meta
+        reparsed_transaction = reparsed_entries[0]
+        assert isinstance(reparsed_transaction, data.Transaction)
+        reparsed_posting_meta = reparsed_transaction.postings[0].meta
+        assert reparsed_posting_meta is not None
         assert reparsed_posting_meta["pwa_post"] == "original"
         assert reparsed_posting_meta["pwa_post_2"] == "renamed"
         assert reparsed_posting_meta["pwa_foo_bar"] == 3
@@ -568,6 +575,10 @@ class TestInfrastructureRoot:
         assert "-2 SPY {} @ 547 USD" in content
         reparsed_entries, reparsed_errors, _ = parser.parse_string(content)
         assert not reparsed_errors
+        assert any(
+            isinstance(entry, data.Transaction) and entry.narration == "Sell SPY"
+            for entry in reparsed_entries
+        )
 
     def test_infrastructure_root_rejects_plugin_mutated_cost_behind_empty_fifo_source(
         self, tmp_path, monkeypatch
@@ -600,7 +611,7 @@ class TestInfrastructureRoot:
         )
         changed_postings = list(sell.postings)
         changed_postings[0] = changed_postings[0]._replace(
-            cost=data.Cost(Decimal("999"), "USD", None, "plugin-selected")
+            cost=Cost(Decimal(999), "USD", datetime.date(2024, 4, 11), "plugin-selected")
         )
         changed_sell = sell._replace(postings=changed_postings)
         mutated_entries = [changed_sell if entry is sell else entry for entry in entries]
@@ -620,14 +631,22 @@ class TestInfrastructureRoot:
 
     def test_is_empty_cost_spec_rejects_non_empty(self):
         """A fully-specified CostSpec (e.g. {517.9 USD}) must not be treated as empty."""
-        from cashier_snapshot.reconcile import _is_empty_cost_spec
         from beancount.core.number import MISSING
 
-        empty = data.CostSpec(
-            number_per=MISSING, number_total=None, currency=MISSING,
-            date=None, label=None, merge=False,
+        from cashier_snapshot.reconcile import _is_empty_cost_spec
+
+        entries, errors, _ = parser.parse_string(
+            '2024-01-01 * "Empty cost spec"\n'
+            '  Assets:MyStockBroker:SPY -2 SPY {}\n'
         )
-        non_empty = data.CostSpec(
+        assert not errors
+        transaction = entries[0]
+        assert isinstance(transaction, data.Transaction)
+        empty = transaction.postings[0].cost
+        assert isinstance(empty, CostSpec)
+        assert empty.number_per is MISSING
+        assert empty.currency is MISSING
+        non_empty = CostSpec(
             number_per=Decimal("517.9"), number_total=None, currency="USD",
             date=None, label=None, merge=False,
         )

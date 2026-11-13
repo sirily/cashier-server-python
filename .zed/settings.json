@@ -1,0 +1,25 @@
+{
+  "context_server_timeout": 120,
+  "context_servers": {
+    "serena": {
+      "command": "uvx",
+      "args": [
+        "--python", "3.13",
+        "--from", "serena-agent==2.1.0",
+        "serena", "start-mcp-server",
+        "--context", "ide",
+        "--project-from-cwd",
+        "--agent-interface", "tools",
+        "--enable-web-dashboard", "false",
+        "--open-web-dashboard", "false"
+      ]
+    },
+    "gitnexus": {
+      "command": "npm",
+      "args": [
+        "exec", "--yes", "--package=gitnexus@1.6.12",
+        "--", "gitnexus", "mcp"
+      ]
+    }
+  }
+}

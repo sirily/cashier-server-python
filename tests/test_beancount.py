@@ -3,9 +3,10 @@ Test beancount methods
 '''
 
 import os
-import pytest
-import main
 
+import pytest
+
+import main
 
 # Get the directory of the test files
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))

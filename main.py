@@ -7,16 +7,20 @@ import base64
 import hmac
 import os
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional, List
+
 import uvicorn
-from loguru import logger
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from loguru import logger
 from pydantic import BaseModel
-from dotenv import load_dotenv
+from starlette.concurrency import run_in_threadpool
 
+# Exception traces must not copy ledger data or request locals into server logs.
+logger.configure(handlers=[{"sink": sys.stderr, "diagnose": False, "backtrace": False}])
 
 load_dotenv()
 BEAN_FILE = os.getenv("BEANCOUNT_FILE")
@@ -34,7 +38,7 @@ CASHIER_CORS_ORIGINS = [
 app = FastAPI(
     title="Cashier Server",
     description="Ledger-cli REST server for Cashier PWA",
-    version="0.13.0",
+    version="0.14.0",
 )
 
 # Configure CORS. In production the app is expected to be served same-origin
@@ -81,7 +85,7 @@ async def require_api_token(request: Request, call_next):
 
 
 @app.get("/")
-async def index(query: Optional[str] = None):
+async def index(query: str | None = None):
     """Index. Based on the settings, it uses Ledger or Beancount for data."""
     if not query:
         return {"error": "No query provided"}
@@ -93,7 +97,7 @@ async def index(query: Optional[str] = None):
 
 
 # @app.get("/")
-async def ledger(query: Optional[str] = None):
+async def ledger(query: str | None = None):
     """
     Execute a ledger command and return the result.
 
@@ -103,11 +107,15 @@ async def ledger(query: Optional[str] = None):
     Returns:
         The result of the ledger command
     """
+    if not query:
+        return {"error": "No query provided"}
+
     logger.info(f"Ledger query: {query}")
 
     try:
         # Execute the ledger command
-        process = subprocess.run(
+        process = await run_in_threadpool(
+            subprocess.run,
             ["ledger"] + query.split(),
             capture_output=True,
             text=True,
@@ -142,7 +150,7 @@ def preload_beancount_data():
     return connection
 
 
-async def beancount(query: Optional[str] = None):
+async def beancount(query: str | None = None):
     """
     Execute a beancount query and return the result.
     Requires Beancount to be installed.
@@ -202,8 +210,8 @@ async def hello_img():
     Return a base64-encoded image.
     """
     # This is a placeholder - you would need to replace with your actual image
-    with open("hello.png", "rb") as image_file:
-        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+    image = await run_in_threadpool(Path("hello.png").read_bytes)
+    encoded_string = base64.b64encode(image).decode("utf-8")
 
     return encoded_string
 
@@ -307,14 +315,11 @@ def render_materialized_root_book() -> str:
         ) from exc
 
     logger.info(
-        "Built standalone PWA snapshot: retained={}, omitted_infrastructure={}, "
-        "consumed_operational={}, generated={}, transformed={}, bytes={}",
-        stats.retained,
-        stats.omitted_infrastructure,
-        stats.consumed_operational,
-        stats.generated,
-        stats.transformed,
-        len(content.encode("utf-8")),
+        f"Built standalone PWA snapshot: retained={stats.retained}, "
+        f"omitted_infrastructure={stats.omitted_infrastructure}, "
+        f"consumed_operational={stats.consumed_operational}, "
+        f"generated={stats.generated}, transformed={stats.transformed}, "
+        f"bytes={len(content.encode('utf-8'))}"
     )
     return content
 
@@ -409,17 +414,17 @@ def refresh_beancount_connection():
 
 
 class XactRequest(BaseModel):
-    transactions: List[str]
+    transactions: list[str]
 
 
 class XactRejected(BaseModel):
-    cashier_id: Optional[str] = None
+    cashier_id: str | None = None
     reason: str
 
 
 class XactResponse(BaseModel):
-    synchronized: List[str]
-    rejected: List[XactRejected]
+    synchronized: list[str]
+    rejected: list[XactRejected]
 
 
 @app.post("/xact")
@@ -454,8 +459,8 @@ async def write_xact(request: XactRequest):
     if wrote:
         try:
             refresh_beancount_connection()
-        except Exception as exc:
-            logger.warning("Beancount connection refresh failed after writeback: {}", exc)
+        except Exception:
+            logger.exception("Beancount connection refresh failed after writeback")
 
     return XactResponse(
         synchronized=result["synchronized"],
@@ -481,11 +486,14 @@ def main():
 
     # Create a server instance that can be referenced
     # uvicorn.run(app, host="0.0.0.0", port=3000)
-    ssl_kwargs = {}
+    ssl_keyfile = ssl_certfile = None
     if CASHIER_SSL_KEY and CASHIER_SSL_CERT:
-        ssl_kwargs = {"ssl_keyfile": CASHIER_SSL_KEY, "ssl_certfile": CASHIER_SSL_CERT}
-        logger.info(f"SSL enabled: key={CASHIER_SSL_KEY}, cert={CASHIER_SSL_CERT}")
-    config = uvicorn.Config(app, host="0.0.0.0", port=3000, **ssl_kwargs)
+        ssl_keyfile, ssl_certfile = CASHIER_SSL_KEY, CASHIER_SSL_CERT
+        logger.info(f"SSL enabled: key={ssl_keyfile}, cert={ssl_certfile}")
+    config = uvicorn.Config(
+        app, host="0.0.0.0", port=3000,
+        ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+    )
     server = uvicorn.Server(config)
 
     # Store the server instance in the app state

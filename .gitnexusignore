@@ -1,0 +1,19 @@
+# Python tests are indexed by default. Do not broadly unignore directories:
+# negations can override built-in credential and artifact exclusions.
+
+# Keep the index local and exclude credentials, caches, and build artifacts.
+.gitnexus/
+.serena/
+.env
+.env.*
+.ledgerrc
+.venv/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+wheels/
+*.egg-info/
+tests/acceptance/node_modules/

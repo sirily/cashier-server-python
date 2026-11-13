@@ -1,6 +1,6 @@
 [project]
 name = "cashier-server"
-version = "0.13.0"
+version = "0.14.0"
 description = "Cashier synchronization server in Python"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,6 +34,8 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-timeout>=2.3.1",
     "httpx>=0.28.0",
+    "ruff==0.17.5",
+    "basedpyright==1.40.2",
 ]
 
 [tool.pytest.ini_options]
@@ -45,8 +47,19 @@ markers = [
     "docker_acceptance: tests that require Docker daemon and a built image",
 ]
 
+[tool.ruff.lint]
+logger-objects = ["loguru.logger"]
+
+[tool.pyright]
+# Share the uv environment with Zed/Basedpyright and Serena/Pyright.
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+# Opened dependency sources are not maintained by this repository.
+ignore = [".venv"]
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
