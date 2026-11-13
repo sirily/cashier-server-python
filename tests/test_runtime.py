@@ -1,6 +1,7 @@
 """Runtime helpers must preserve responses without blocking the event loop."""
 
 
+import re
 import subprocess
 import sys
 import threading
@@ -96,7 +97,9 @@ def test_server_passes_explicit_tls_options(monkeypatch, key, cert, expected):
 
 
 @pytest.mark.parametrize("unsafe_diagnostics", [False, True])
-def test_exception_logging_omits_private_local_values(tmp_path, unsafe_diagnostics):
+@pytest.mark.parametrize("colorize", [False, True])
+def test_exception_logging_omits_private_local_values(tmp_path, monkeypatch, unsafe_diagnostics, colorize):
+    monkeypatch.setenv("LOGURU_COLORIZE", str(colorize).lower())
     code = '''
 import sys
 import main
@@ -123,7 +126,9 @@ except RuntimeError:
     if unsafe_diagnostics:
         command.append("unsafe")
     result = subprocess.run(command, capture_output=True, text=True, check=True)
-    assert "RuntimeError: reload failed" in result.stderr
-    assert "Refresh failure" in result.stderr
+    assert ("\x1b[" in result.stderr) is colorize
+    stderr = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+    assert "RuntimeError: reload failed" in stderr
+    assert "Refresh failure" in stderr
     # The positive control proves this file-backed traceback detects the leak.
-    assert ("PRIVATE-LEDGER-CONTENT" in result.stderr) is unsafe_diagnostics
+    assert ("PRIVATE-LEDGER-CONTENT" in stderr) is unsafe_diagnostics
