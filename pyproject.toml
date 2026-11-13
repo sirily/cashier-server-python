@@ -45,6 +45,12 @@ markers = [
     "docker_acceptance: tests that require Docker daemon and a built image",
 ]
 
+[tool.pyright]
+# Share the uv environment with Zed/Basedpyright and Serena/Pyright.
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

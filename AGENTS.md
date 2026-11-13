@@ -13,7 +13,11 @@ Cashier Server Python is the API/server component for Cashier.
 
 ## Tools
 
-- Use ripgrep (`rg`) for fast text search across files.
+- Use ripgrep (`rg`) for text, configuration, and Beancount source searches.
+- Prefer Serena MCP or the IDE's Python LSP for symbols, definitions, and references.
+- For nontrivial cross-file changes, use GitNexus context/impact analysis when the index is available; refresh it after code changes. Treat empty, stale, partial, truncated, or `UNKNOWN` results as inconclusive and confirm with LSP/`rg` and tests.
+- Graph analysis does not prove dynamic Python plugin behavior, Beancount semantics, or the PWA/RustLedger boundary. Do not replace the relevant tests with graph checks.
+- Setup, pinned commands, and index maintenance are documented in `/docs/code-intelligence.md`. Index only this source repository, never the production ledger workspace. These tools are development-only, not server dependencies.
 
 ## Architecture docs
 

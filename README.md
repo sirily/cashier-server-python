@@ -87,6 +87,10 @@ Do not configure a writable directory or client-controlled write path.
 
 ## Development
 
+[Code-intelligence setup](docs/code-intelligence.md) covers Serena (Python LSP),
+GitNexus, the project MCP configuration, and local index maintenance. These tools
+are development-only and are not installed in the production image.
+
 VSCode recommended.
 Run the `run.cmd` script to start the server.
 Or run from VSCode to debug.
