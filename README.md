@@ -2,24 +2,22 @@
 
 Cashier synchronization server, in Python
 
-Ledger-cli REST server for [Cashier](https://github.com/alensiljak/cashier) PWA, implemented in Python with FastAPI.
+Beancount synchronization server for [Cashier](https://github.com/alensiljak/cashier) PWA, implemented in Python with FastAPI.
 
-Cashier Server acts as a mediator between Cashier PWA and Ledger CLI, forwarding queries to Ledger and the results to Cashier. Used for synchronizing the ledger data in Cashier.
-
-This is a Python implementation of the Cashier Server using FastAPI.
+The server executes BQL queries for Accounts and Payees, serves a source-preserving standalone Beancount snapshot for offline sync, and accepts the narrow manual transaction writeback channel. Beancount is the only supported backend; Ledger CLI is not used.
 
 ## Installation
 
 1. Install `uv`
 2. Install `uv tool install cashier-server`
 
-### Configure Backend
+### Configure Beancount and authentication
 
-To use Beancount as a back-end, set the `BEANCOUNT_FILE` environment variable.
+Set `BEANCOUNT_FILE` to the root of your Beancount book and `CASHIER_API_TOKEN` to a deployment-scoped bearer token. You can set these environment variables in an `.env` file in the working directory.
 
-The easiest way is by creating an `.env` file containing this variable, 
-which should point to your Beancount book.
-Otherwise, Cashier Server will use Ledger as the backend.
+Both settings are required: the server refuses to start without either one. If imported as an ASGI application without `BEANCOUNT_FILE`, BQL and reload requests return HTTP 500 with `BEANCOUNT_FILE must be configured`, never a Ledger CLI fallback.
+
+Send `Authorization: Bearer <your-token>` on API requests. `/health` is available without authentication for container probes.
 
 ### Configure Certificates
 
@@ -35,22 +33,23 @@ Then, open the Cashier Server URL in the browser and accept the self-signed cert
 
 ## Run
 
-Execute `cashier-server-py` script provided by the `cashier-server` package.
+Execute the `cashier-server` script provided by the `cashier-server` package.
 
 The server runs on 0.0.0.0:3000, matching the Rust implementation.
 
 ## API Endpoints
 
-- `/` - Execute a ledger command
-- `/hello` - Return a base64-encoded image
-- `/ping` - Simple health check
-- `/reload` - Reload the Beancout data
-- `/shutdown` - Request server shutdown
+- `/?query=SELECT...` - Execute a Beancount BQL query, including Accounts and Payees queries
+- `/ping` - Simple authenticated liveness check
+- `/health` - Unauthenticated container health/status check
+- `/reload` - Reload the Beancount data
 - `/infrastructure?file_path=config.bean` - Return a Beancount workspace file as `{ "content": "..." }`
 - `/infrastructure?file_path=prices/*.bean` - Return matching Beancount workspace files as `{ "files": [{ "path": "prices/2024.bean", "content": "..." }] }`
 - `/xact` - Stage 2 manual transaction writeback endpoint. Deployment exposes it as `/api/xact`; it accepts only Cashier-created completed transaction directives with `cashier_id` and writes only to the configured `BEANCOUNT_MANUAL_TRANSACTIONS_FILE`.
 
-CORS is enabled for all origins, similar to the Rust implementation.
+`/hello` and `/shutdown` have been removed and return `404` for authenticated requests. Stop the process through your service manager or container runtime; `CASHIER_ENABLE_SHUTDOWN` is no longer a supported setting.
+
+CORS allows all origins by default. Set `CASHIER_CORS_ORIGINS` to a comma-separated origin list to restrict it; wildcard origins do not enable credentials.
 
 ## Stage 2 manual transaction writeback
 
@@ -70,11 +69,16 @@ volumes:
 include "manual_transactions.bean"
 ```
 
-Configure the fixed writeback target with:
+The deployment environment must include:
 
-```text
-BEANCOUNT_MANUAL_TRANSACTIONS_FILE=/workspace/manual_transactions.bean
+```yaml
+environment:
+  BEANCOUNT_FILE: /workspace/main.bean
+  BEANCOUNT_MANUAL_TRANSACTIONS_FILE: /workspace/manual_transactions.bean
+  CASHIER_API_TOKEN: <supply-through-your-deployment-secret-configuration>
 ```
+
+The root book and manual file must exist before starting the container. The image runs as a non-root user, which needs read access to the book and write access to the single manual file. Do not configure `CASHIER_ENABLE_SHUTDOWN` or install Ledger CLI.
 
 Do not configure a writable directory or client-controlled write path.
 
@@ -102,18 +106,16 @@ Or run from VSCode to debug.
 
 ### Debug
 
-Make sure that Beancount is configured and can be called from the current directory.
-Then run:
+Configure `BEANCOUNT_FILE` and `CASHIER_API_TOKEN`, then run from the repository root:
 
 ```sh
-run.cmd
-# or
-uv run python app.py
-# Or uvicorn directly:
-uvicorn app:app --host 0.0.0.0 --port 3000
+uv run cashier-server
+# Or run the same entry point directly:
+uv run python main.py
 ```
+
+On Windows, `run.cmd` runs the same entry point. Use this entry point rather than a bare `uvicorn main:app` invocation so that the BQL connection is preloaded and configuration is checked before serving requests.
 
 ## Notes on the Implementation
 
 - Logging is configured to output to the console.
-- For the `/hello` endpoint, you would need to provide an actual image file named "hello.png" in the same directory as the app.py file.

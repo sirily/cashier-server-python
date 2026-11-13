@@ -32,8 +32,8 @@ def _load_full_ledger():
     bean_file = _get_bean_file()
     if not bean_file:
         raise ValueError("BEANCOUNT_FILE not configured")
-    entries, errors, options_map = loader.load_file(bean_file)
-    return entries, errors, options_map
+    entries, _, _ = loader.load_file(bean_file)
+    return entries
 
 
 def _extract_cashier_id(entry: data.Transaction) -> str | None:
@@ -65,7 +65,7 @@ def _validate_accounts(entry: data.Transaction, existing_entries: list) -> list:
     ]
 
 
-def _normalize_entry(entry: data.Transaction, options_map: dict) -> str:
+def _normalize_entry(entry: data.Transaction) -> str:
     """Normalize a transaction to stable text using Beancount's printer."""
     # An empty context uses fixed-point Decimal formatting without rounding.
     # Ledger display precision is presentation-only, never storage precision.
@@ -84,7 +84,6 @@ def _read_manual_transactions_text(filepath: str) -> str:
 def _append_entries_to_source(
     existing_content: str,
     valid_new_entries: list,
-    options_map: dict,
 ) -> str:
     """Append normalized new transactions without reprinting existing source."""
     if not valid_new_entries:
@@ -135,7 +134,7 @@ def _write_file_crash_conscious(
         os.fsync(f.fileno())
 
 
-def _validate_candidate_as_full_ledger(content: str, options_map: dict) -> list:
+def _validate_candidate_as_full_ledger(content: str) -> list:
     """Validate candidate manual_transactions.bean as part of the full ledger.
 
     Creates a private temp directory outside the ledger workspace, copies the
@@ -198,11 +197,10 @@ def _validate_candidate_as_full_ledger(content: str, options_map: dict) -> list:
 def _validation_error_texts_for_entry(
     base_content: str,
     entry: data.Transaction,
-    options_map: dict,
 ) -> list:
     """Validate one candidate entry in the full ledger context."""
-    candidate = _append_entries_to_source(base_content, [entry], options_map)
-    return _validate_candidate_as_full_ledger(candidate, options_map)
+    candidate = _append_entries_to_source(base_content, [entry])
+    return _validate_candidate_as_full_ledger(candidate)
 
 
 def _unique_ids(ids: list[str]) -> list[str]:
@@ -246,7 +244,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                         )
                     existing_by_id[cid] = entry
 
-        full_entries, _, full_options = _load_full_ledger()
+        full_entries = _load_full_ledger()
 
         synchronized = []
         rejected = []
@@ -304,8 +302,8 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                 continue
 
             if cashier_id in existing_by_id:
-                normalized_new = _normalize_entry(entry, full_options)
-                normalized_existing = _normalize_entry(existing_by_id[cashier_id], full_options)
+                normalized_new = _normalize_entry(entry)
+                normalized_existing = _normalize_entry(existing_by_id[cashier_id])
                 if normalized_new == normalized_existing:
                     synchronized.append(cashier_id)
                 else:
@@ -317,11 +315,10 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
 
             if cashier_id in seen_ids_in_request:
                 prev_entry = seen_ids_in_request[cashier_id]
-                normalized_prev = _normalize_entry(prev_entry, full_options)
-                normalized_cur = _normalize_entry(entry, full_options)
+                normalized_prev = _normalize_entry(prev_entry)
+                normalized_cur = _normalize_entry(entry)
                 if normalized_prev == normalized_cur:
-                    if cashier_id in accepted_new_ids:
-                        synchronized.append(cashier_id)
+                    synchronized.append(cashier_id)
                 else:
                     rejected.append({
                         "cashier_id": cashier_id,
@@ -329,11 +326,10 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                     })
                 continue
 
-            validation_base = _append_entries_to_source(existing_content, valid_new, full_options)
+            validation_base = _append_entries_to_source(existing_content, valid_new)
             validation_errors = _validation_error_texts_for_entry(
                 validation_base,
                 entry,
-                full_options,
             )
             if validation_errors:
                 rejected.append({
@@ -355,9 +351,9 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                 wrote,
             )
 
-        candidate = _append_entries_to_source(existing_content, valid_new, full_options)
+        candidate = _append_entries_to_source(existing_content, valid_new)
 
-        validation_errors = _validate_candidate_as_full_ledger(candidate, full_options)
+        validation_errors = _validate_candidate_as_full_ledger(candidate)
         if validation_errors:
             rejected.append({
                 "cashier_id": None,
