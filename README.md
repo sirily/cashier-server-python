@@ -87,6 +87,11 @@ Do not configure a writable directory or client-controlled write path.
 
 ## Development
 
+Read the [release policy](docs/releasing.md) before creating release/work branches,
+changing versions, publishing, or deploying. It follows the Cashier PWA release
+model: release-branch pushes produce RC images, and squash-merging the release PR
+produces the final versioned image and GitHub Release.
+
 [Code-intelligence setup](docs/code-intelligence.md) covers Serena (Python LSP),
 GitNexus, the project MCP configuration, and local index maintenance. These tools
 are development-only and are not installed in the production image.

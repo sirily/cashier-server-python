@@ -19,6 +19,13 @@ Cashier Server Python is the API/server component for Cashier.
 - Graph analysis does not prove dynamic Python plugin behavior, Beancount semantics, or the PWA/RustLedger boundary. Do not replace the relevant tests with graph checks.
 - Setup, pinned commands, and index maintenance are documented in `/docs/code-intelligence.md`. Index only this source repository, never the production ledger workspace. These tools are development-only, not server dependencies.
 
+## Release policy
+
+- Read `/docs/releasing.md` before creating branches, changing versions, preparing releases, publishing, or deploying.
+- The owner selects `X.Y.Z`; work targets `releases/X.Y.Z`, not `main`. Keep `pyproject.toml`, the root `cashier-server` version in `uv.lock`, and the FastAPI version in `main.py` aligned.
+- Do not commit, push, merge, tag, publish, or deploy without the owner's corresponding request. Do not assign RC numbers manually.
+- Release automation lives in `.github/workflows/` and `scripts/release.mjs`; run the release regression tests before changing publication behavior. Final publication follows squash-merge of a same-repository release PR into `main`.
+
 ## Architecture docs
 
 - Current architecture docs are in `/docs/architecture/`.
