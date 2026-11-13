@@ -6,25 +6,24 @@ them to the configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE.
 
 import os
 import shutil
-import threading
 import tempfile
+import threading
 from pathlib import Path
-from typing import Optional
 
+from beancount import loader
 from beancount.core import data, display_context
 from beancount.parser import parser
 from beancount.parser.printer import EntryPrinter
-from beancount import loader
 from loguru import logger
 
 _lock = threading.Lock()
 
 
-def _get_manual_transactions_file() -> Optional[str]:
+def _get_manual_transactions_file() -> str | None:
     return os.environ.get("BEANCOUNT_MANUAL_TRANSACTIONS_FILE")
 
 
-def _get_bean_file() -> Optional[str]:
+def _get_bean_file() -> str | None:
     return os.environ.get("BEANCOUNT_FILE")
 
 
@@ -37,7 +36,7 @@ def _load_full_ledger():
     return entries, errors, options_map
 
 
-def _extract_cashier_id(entry: data.Transaction) -> Optional[str]:
+def _extract_cashier_id(entry: data.Transaction) -> str | None:
     """Extract cashier_id from transaction metadata."""
     if not isinstance(entry, data.Transaction):
         return None
@@ -161,8 +160,10 @@ def _validate_candidate_as_full_ledger(content: str, options_map: dict) -> list:
         manual_rel = manual_path.relative_to(ledger_root)
     except ValueError:
         return [
-            "manual_transactions.bean is outside the ledger root; "
-            "candidate validation requires the manual file to be inside the ledger root"
+            (
+                "manual_transactions.bean is outside the ledger root; "
+                "candidate validation requires the manual file to be inside the ledger root"
+            )
         ]
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cashier_validation_"))
@@ -188,7 +189,7 @@ def _validate_candidate_as_full_ledger(content: str, options_map: dict) -> list:
 
         return [str(e) for e in errors]
     except Exception as exc:
-        logger.warning("Full-ledger validation error: {}", exc)
+        logger.exception("Full-ledger validation error")
         return [f"Validation error: {exc}"]
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
@@ -370,10 +371,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
                 wrote,
             )
 
-        logger.info(
-            "Writing {} new transaction(s) to {}",
-            len(valid_new), manual_file,
-        )
+        logger.info(f"Writing {len(valid_new)} new transaction(s) to {manual_file}")
         _write_file_crash_conscious(manual_file, existing_content, candidate)
         wrote = True
         synchronized.extend(accepted_new_ids)

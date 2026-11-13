@@ -45,6 +45,9 @@ markers = [
     "docker_acceptance: tests that require Docker daemon and a built image",
 ]
 
+[tool.ruff.lint]
+logger-objects = ["loguru.logger"]
+
 [tool.pyright]
 # Share the uv environment with Zed/Basedpyright and Serena/Pyright.
 venvPath = "."
