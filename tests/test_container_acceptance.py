@@ -91,12 +91,14 @@ def _container_logs():
         return None
 
 
-def _get(path, params=None, authorization: str | None = f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None):
+def _get(path, params=None, authorization: str | None = f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None, host=None):
     url = f"http://127.0.0.1:{HOST_PORT}{path}"
     if params:
         qs = "&".join(f"{k}={quote(v)}" for k, v in params.items())
         url = f"{url}?{qs}"
     headers = {} if authorization is None else {"Authorization": authorization}
+    if host is not None:
+        headers["Host"] = host
     if data is not None:
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, headers=headers, method=method, data=data)
@@ -179,6 +181,41 @@ class TestContainerAcceptance:
         assert status == 401
         assert json.loads(body) == {"detail": "Invalid or missing API token"}
         assert AUTH_CREDENTIAL not in body
+
+    @pytest.mark.parametrize("host", ["testserver/health?", "testserver/health#"])
+    @pytest.mark.parametrize("path,method,data", [
+        ("/infrastructure?file_path=main.bean", "GET", None),
+        ("/?query=SELECT%201", "GET", None),
+        ("/xact", "POST", b'{"transactions": []}'),
+    ])
+    def test_malformed_host_never_bypasses_authentication(self, host, path, method, data):
+        status, _ = _get(path, authorization=None, method=method, data=data, host=host)
+        assert status == 400
+
+    @pytest.mark.parametrize("query", [
+        "CREATE TABLE accounts (account str)",
+        "INSERT INTO accounts (account) VALUES ('Assets:Fake')",
+        "CREATE TABLE external (line str) USING 'csv:/outside/synthetic.txt'",
+    ])
+    def test_bql_mutations_and_external_sources_rejected(self, query):
+        status, _ = _get("/", params={"query": query})
+        assert status == 400
+        status, body = _get("/", params={"query": "SELECT account FROM #accounts LIMIT 1"})
+        assert status == 200
+        assert len(json.loads(body)) == 1
+
+    def test_pwa_payees_query_remains_available(self):
+        status, body = _get("/", params={
+            "query": "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee LIMIT 10",
+        })
+        assert status == 200
+        assert json.loads(body)
+
+    def test_infrastructure_rejects_hidden_nonledger_paths(self):
+        status, _ = _get("/infrastructure", params={"file_path": ".env"})
+        assert status == 403
+        status, _ = _get("/infrastructure", params={"file_path": "credentials.txt"})
+        assert status == 403
 
     def test_missing_token_container_refuses_startup(self):
         name = f"{CONTAINER_NAME}-missing-token"

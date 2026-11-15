@@ -222,7 +222,7 @@ def test_infrastructure_file_path_is_not_executed_as_shell(configured_test_book,
 
     response = client.get("/infrastructure", params={"file_path": payload})
 
-    assert response.status_code == 404
+    assert response.status_code == 403
     assert not marker.exists()
 
 
