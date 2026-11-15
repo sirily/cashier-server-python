@@ -77,3 +77,114 @@ def test_append_and_canonicalization_preserve_all_precision(annotation):
     changed_entry = changed[0]
     assert isinstance(changed_entry, data.Transaction)
     assert writeback._normalize_entry(entry) != writeback._normalize_entry(changed_entry)
+
+
+def test_crlf_unicode_prefix_and_high_precision_survive_retries(configured_env):
+    manual = Path(configured_env)
+    prefix = "; café original source\r\n; untouched comment\r\n".encode()
+    manual.write_bytes(prefix)
+    text = transaction("7.123456789123456789")
+    first, wrote = writeback.validate_and_commit([text, text])
+    assert wrote
+    assert first == {"synchronized": ["decimal-regression"], "rejected": []}
+    committed = manual.read_bytes()
+    assert committed.startswith(prefix)
+    writeback._check_writeback_integrity(committed)
+    retry, wrote = writeback.validate_and_commit([text])
+    assert not wrote
+    assert retry == first
+    assert manual.read_bytes() == committed
+    entries, errors, _ = parser.parse_string(committed)
+    assert not errors
+    entry = entries[0]
+    assert isinstance(entry, data.Transaction)
+    assert entry.postings[0].units is not None
+    assert entry.postings[0].units.number == Decimal("-7.123456789123456789")
+
+
+def test_reordered_metadata_and_formatting_are_idempotent_without_rounding(configured_env):
+    original = transaction("7.123456789123456789").replace(
+        '  cashier_id: "decimal-regression"\n',
+        '  cashier_id: "decimal-regression"\n  zeta: "last"\n  alpha: "first"\n',
+    ).replace(
+        '  Equity:Opening-Balances',
+        '    zeta: "posting-last"\n    alpha: "posting-first"\n  Equity:Opening-Balances',
+    )
+    reordered = original.replace(
+        '  cashier_id: "decimal-regression"\n  zeta: "last"\n  alpha: "first"',
+        '  alpha: "first"\n  zeta: "last"\n  cashier_id: "decimal-regression"',
+    ).replace(
+        '    zeta: "posting-last"\n    alpha: "posting-first"',
+        '    alpha: "posting-first"\n    zeta: "posting-last"',
+    ).replace("  Assets:Cash -", "  Assets:Cash    -")
+    result, wrote = writeback.validate_and_commit([original, reordered])
+    assert wrote
+    assert result == {"synchronized": ["decimal-regression"], "rejected": []}
+    committed = Path(configured_env).read_bytes()
+    result, wrote = writeback.validate_and_commit([reordered])
+    assert not wrote
+    assert result == {"synchronized": ["decimal-regression"], "rejected": []}
+    assert Path(configured_env).read_bytes() == committed
+    changed = reordered.replace("7.123456789123456789", "7.123456789123456788")
+    result, wrote = writeback.validate_and_commit([changed])
+    assert not wrote
+    assert "Conflict" in result["rejected"][0]["reason"]
+    assert Path(configured_env).read_bytes() == committed
+
+
+@pytest.mark.parametrize("label, preserves_semantics", [
+    ("ordinary lot", True), ("first line\nsecond line", True),
+    ('ordinary "quote"', False), ("ordinary\\label", False), ("", False),
+])
+def test_lot_label_serialization_requires_exact_semantic_roundtrip(label, preserves_semantics):
+    quoted = '"' + label.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    text = (
+        '2026-05-28 * "Lot roundtrip"\n'
+        '  cashier_id: "lot-roundtrip"\n'
+        f'  Assets:Cash 7.123456789 USD {{1 USD, {quoted}}}\n'
+        '  Equity:Opening-Balances -7.123456789 USD\n'
+    )
+    entries, errors, _ = writeback._parse_transaction(text)
+    assert not errors
+    entry = entries[0]
+    if not preserves_semantics:
+        with pytest.raises(ValueError, match="serialization must preserve"):
+            writeback._normalize_entry(entry)
+        with pytest.raises(ValueError, match="serialization must preserve"):
+            writeback._append_entries_to_source("", [entry])
+        return
+    rendered = writeback._normalize_entry(entry)
+    reparsed, errors, _ = writeback._parse_transaction(rendered)
+    assert not errors
+    assert len(reparsed) == 1
+    assert writeback._transaction_semantics(reparsed[0]) == writeback._transaction_semantics(entry)
+    assert reparsed[0].postings[0].cost.label == label
+    assert reparsed[0].postings[0].units.number == Decimal("7.123456789")
+
+
+@pytest.mark.parametrize("label", ["ordinary lot", "first line\nsecond line"])
+def test_safe_lot_labels_remain_capturable_and_idempotent(configured_env, label):
+    from cashier_snapshot.workspace import LedgerWorkspace
+
+    text = (
+        '2026-05-28 * "Lot roundtrip"\n'
+        '  cashier_id: "lot-roundtrip"\n'
+        f'  Assets:Cash 7.123456789 USD {{1 USD, "{label}"}}\n'
+        '  Equity:Opening-Balances -7.123456789 USD\n'
+    )
+    result, wrote = writeback.validate_and_commit([text])
+    assert wrote
+    assert result == {"synchronized": ["lot-roundtrip"], "rejected": []}
+    manual = Path(configured_env)
+    committed = manual.read_bytes()
+    workspace = LedgerWorkspace.capture(manual.with_name("main.bean"))
+    assert workspace.files[Path(manual.name)] == committed
+    reparsed, errors, _ = writeback._parse_transaction(committed.decode())
+    assert not errors
+    assert len(reparsed) == 1
+    assert reparsed[0].postings[0].cost.label == label
+    assert reparsed[0].postings[0].units.number == Decimal("7.123456789")
+    retry, wrote = writeback.validate_and_commit([text])
+    assert not wrote
+    assert retry == result
+    assert manual.read_bytes() == committed
