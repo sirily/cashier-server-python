@@ -14,6 +14,7 @@ from .errors import SnapshotBuildError
 from .plugin_policies import validate_source_preserving_plugins
 from .reconcile import classify_source_entries, final_origin_key
 from .source_index import SourceLedgerIndex
+from .workspace import LedgerWorkspace, LedgerWorkspaceError
 
 
 @dataclass
@@ -40,17 +41,27 @@ class StandaloneSnapshotBuilder:
         root_path: Path,
         print_generated: Callable[[list, dict], str],
     ):
-        self.root_path = root_path.resolve()
+        self.root_path = root_path
         self.print_generated = print_generated
 
     def build(self) -> tuple[str, SnapshotStats]:
-        source_index = SourceLedgerIndex.build(self.root_path)
+        try:
+            workspace = LedgerWorkspace.capture(self.root_path)
+            with workspace.private_copy() as staged_root:
+                return self._build_workspace(staged_root, workspace)
+        except LedgerWorkspaceError as exc:
+            raise SnapshotBuildError(str(exc)) from exc
+
+    def _build_workspace(
+        self, staged_root: Path, workspace: LedgerWorkspace
+    ) -> tuple[str, SnapshotStats]:
+        source_index = SourceLedgerIndex.build(staged_root, workspace=workspace)
         validate_source_preserving_plugins(source_index.plugin_names)
         # Use the validated mapping: repeated includes would otherwise collapse
         # identical origin keys and make retention incorrectly non-fail-closed.
         entry_blocks = source_index.entry_blocks
 
-        booked_entries, booking_errors, _ = load_booked_source_entries(self.root_path)
+        booked_entries, booking_errors, _ = load_booked_source_entries(staged_root)
         if booking_errors:
             raise SnapshotBuildError(
                 "Beancount root book could not be core-booked before materialization: "
@@ -60,7 +71,7 @@ class StandaloneSnapshotBuilder:
             final_origin_key(entry): entry for entry in booked_entries
         }
 
-        entries, errors, options_map = loader.load_file(str(self.root_path))
+        entries, errors, options_map = loader.load_file(str(staged_root))
         if errors:
             raise SnapshotBuildError(
                 "Beancount root book could not be materialized: "

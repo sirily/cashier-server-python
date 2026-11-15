@@ -8,6 +8,7 @@ materialized entry is still identical to this pre-plugin booked baseline.
 
 from __future__ import annotations
 
+from os.path import abspath
 from pathlib import Path
 
 from beancount import loader
@@ -23,7 +24,7 @@ def load_booked_source_entries(root_path: Path) -> tuple[list, list, dict]:
     in this small adapter and covered by snapshot endpoint regressions.
     """
     entries, errors, options_map = loader._parse_recursive(
-        [(str(root_path.resolve()), True)], None, None
+        [(abspath(root_path), True)], None, None
     )
     entries.sort(key=data.entry_sortkey)
     entries, booking_errors = booking.book(entries, options_map)
