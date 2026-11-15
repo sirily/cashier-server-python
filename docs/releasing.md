@@ -92,16 +92,27 @@ uv sync --locked
 npm --prefix tests/acceptance ci
 docker build --tag cashier-auth-server:e2e .
 DOCKER_ACCEPTANCE=true CASHIER_ACCEPTANCE_SKIP_BUILD=true uv run --locked pytest tests/test_container_acceptance.py --timeout=180 -v
-uv run --locked python scripts/audit.py --image cashier-auth-server:e2e
+uv run --locked --group dev python scripts/audit.py --image cashier-auth-server:e2e
 ```
 
 The skip-build override reuses the image built immediately beforehand from the same source. Without the override, container acceptance builds its own image. A normal Python test run skips container acceptance unless `DOCKER_ACCEPTANCE=true` is set.
 
 Acceptance requires `@rustledger/wasm@0.14.1` to parse the standalone snapshot with **0 parse errors**. Preserve source-preserving export, Python plugin materialization, include/glob behavior, and RustLedger boundary coverage. Python tests also cover manual-transaction validation, `cashier_id` deduplication/conflicts, partial success, and single-file writeback constraints.
 
-`scripts/audit.py` runs pip-audit, npm audit, and Trivy. Findings at every severity, including high and critical, are advisory: retain their original severity and full report details in CI logs and the Actions run summary (`GITHUB_STEP_SUMMARY`), and emit Actions notices. No separate downloadable report artifacts are created. Disclose unauditable dependencies and coverage limitations rather than presenting them as clean results.
+`scripts/audit.py` runs pinned pip-audit 2.9.0 against the PyPI advisory service, npm audit, and Trivy. Findings at every severity, including high and critical, remain **advisory** and emit Actions notices. There is no severity gate, suppression list, or automatic remediation.
 
-Scanner/tool, network, authentication, timeout, malformed-report, inconsistent-exit, and summary-reporting failures block the audit and publication. Successful auditing means valid completed scans, not zero findings. Missing prerequisites or skipped required checks are not passing gates.
+Reporting has two deliberately different surfaces:
+
+- **CI logs:** full original scanner JSON and stdout/stderr, including descriptions, references, repeated findings, and coverage diagnostics. Untrusted output is enclosed in Actions command-stop guards. Open the container job's **Audit Python, Node, and production image dependencies** step; the summary links to its workflow run. No separate downloadable report artifacts are created.
+- **Actions run summary (`GITHUB_STEP_SUMMARY`):** original per-scanner finding counts and severity counts, coverage/skips, and a complete compact table of each unique advisory/package/installed-version/fixed-version/severity with advisory links. Identical rows are collapsed without changing original counts; descriptions and raw diagnostics stay in the logs. Missing severity or fixed-version information is labelled, never invented. npm totals count vulnerable packages; its table resolves direct and transitive `via` advisories and shows both package and advisory severities. Installed npm versions come from the locked acceptance package locations.
+
+The summary has a **900,000 UTF-8 byte** budget, including all existing bytes in the destination file, below Actions' 1 MiB per-step upload limit. It is validated before appending; an oversized existing file, an oversized complete compact table, invalid UTF-8, or a failed/short write makes the script exit nonzero and emits an Actions error. Findings are never silently truncated to make the summary fit. The full reports remain in CI logs even if summary reporting fails. A local run without a summary path uses logs only; an Actions run without a summary destination fails.
+
+Python scope is separate from scanner tooling: run the driver with `uv run --locked --group dev`, inventory the application's actual installed runtime/dev package names and versions, then run pip-audit in a `--no-project --isolated` environment restricted to those installation paths. Report inventory/version mismatches fail closed; installing pip-audit cannot upgrade or substitute application packages. A second, private temporary environment installs the current `[build-system].requires` from `pyproject.toml` and inventories/audits the backend and its installed transitive dependencies separately. The backend requirements are the same as wheel builds; their transitive dependencies are freshly resolved, not guaranteed identical to an earlier isolated wheel build or entries in `uv.lock`. Tool-only scanner dependencies are not counted as application dependencies. The production image remains a separate Trivy scan.
+
+Coverage limitations are explicit: PyPI advisories match package names/versions, not custom source code. The Fava fork and Git-sourced Beancount plugins are listed as custom sources; any package not found on PyPI, invalid-version package, or editable application skip is disclosed individually and is **not a clean result**. A name/version match does not audit fork/plugin changes, and an empty Trivy target list is disclosed rather than called clean.
+
+Scanner/tool, network, authentication, timeout, malformed-report, inconsistent-exit, inventory, and summary-reporting failures block the audit and publication. Successful auditing means valid completed scans and successful reporting, not zero findings. Missing prerequisites or skipped required checks are not passing gates.
 
 ## Immutability, retries, and protections
 

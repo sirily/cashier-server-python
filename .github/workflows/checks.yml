@@ -217,8 +217,10 @@ jobs:
 
       - name: Audit Python, Node, and production image dependencies
         if: ${{ always() && !cancelled() && steps.install_python.outcome == 'success' && steps.install_node.outcome == 'success' && steps.build.outcome == 'success' && steps.trivy.outcome == 'success' }}
-        timeout-minutes: 10
-        run: uv run --locked python scripts/audit.py --image cashier-auth-server:e2e
+        timeout-minutes: 20
+        # Keep the driver in the locked app/dev environment; it isolates scanner tooling.
+        # Full reports stay in logs; the complete compact summary must fit its byte budget.
+        run: uv run --locked --group dev python scripts/audit.py --image cashier-auth-server:e2e
 
   multiarch:
     name: Production build (${{ matrix.platform }})
