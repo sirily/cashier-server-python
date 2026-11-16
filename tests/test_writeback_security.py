@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from beancount import loader
+from beancount.parser import parser
 
 import writeback
 
@@ -570,7 +571,7 @@ def test_printable_metadata_within_byte_bound_is_preserved(configured_env, value
     result, wrote = writeback.validate_and_commit([text])
     assert wrote
     assert result["rejected"] == []
-    entries, errors, _ = writeback.parser.parse_string(Path(configured_env).read_bytes())
+    entries, errors, _ = parser.parse_string(Path(configured_env).read_bytes())
     assert not errors
     assert entries[0].meta["diagnostic"] == value
 
@@ -779,7 +780,7 @@ def test_unsafe_lot_label_rendering_rejected_before_candidate_loading(configured
 
 @pytest.mark.parametrize("alteration", ["amount", "second_transaction", "control"])
 def test_every_rendered_block_is_restricted_and_semantically_checked(configured_env, monkeypatch, alteration):
-    original = writeback.EntryPrinter
+    original = writeback._WritebackPrinter
 
     class ChangedPrinter:
         def __init__(self, *args, **kwargs):
@@ -793,7 +794,7 @@ def test_every_rendered_block_is_restricted_and_semantically_checked(configured_
                 return rendered + "\n" + transaction("second")
             return rendered + '\noption "title" "ordinary title"\n'
 
-    monkeypatch.setattr(writeback, "EntryPrinter", ChangedPrinter)
+    monkeypatch.setattr(writeback, "_WritebackPrinter", ChangedPrinter)
     assert "serialization must preserve" in assert_rejected(configured_env, transaction())
 
 
