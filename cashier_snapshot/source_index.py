@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from os.path import abspath
 from pathlib import Path
 
-from beancount.parser import parser
+from beancount.parser import lexer, parser
 
 from .errors import SnapshotBuildError
+from .workspace import LedgerWorkspace, LedgerWorkspaceError
 
-DIRECTIVE_START_RE = re.compile(
-    r"^(?:"
-    r"\d{4}-\d{2}-\d{2}(?=\s|[*!&#?%PSTC])\s*|"
-    r"option\s+|include\s+|plugin\s+|"
-    r"pushtag\s+|poptag\s+|pushmeta\s+|popmeta\s+"
-    r")"
-)
-INCLUDE_RE = re.compile(r'^include\s+"([^"]+)"')
-PLUGIN_RE = re.compile(r'^plugin\s+"([^"]+)"')
+DIRECTIVE_TOKENS = {
+    "DATE",
+    "OPTION",
+    "INCLUDE",
+    "PLUGIN",
+    "PUSHTAG",
+    "POPTAG",
+    "PUSHMETA",
+    "POPMETA",
+}
+INCLUDE_RE = re.compile(r"^include\s+")
+PLUGIN_RE = re.compile(r"^plugin\s+")
 
 
 @dataclass(frozen=True)
@@ -31,7 +36,6 @@ class SourceBlock:
     kind: str
     text: str
     entry: object | None = None
-    plugin_name: str | None = None
 
     @property
     def origin_key(self) -> tuple[str, int, str] | None:
@@ -43,18 +47,24 @@ class SourceBlock:
 class SourceLedgerIndex:
     """Flatten a Beancount workspace while preserving each source block verbatim."""
 
-    def __init__(self, root_path: Path):
-        self.root_path = root_path.resolve()
+    def __init__(self, root_path: Path, workspace: LedgerWorkspace):
+        self.root_path = Path(abspath(root_path))
+        self.workspace = workspace
         self.ledger_root = self.root_path.parent
         self.blocks: list[SourceBlock] = []
         self.plugin_names: set[str] = set()
         self._active_stack: list[Path] = []
 
     @classmethod
-    def build(cls, root_path: Path) -> SourceLedgerIndex:
-        index = cls(root_path)
-        index._index_file(index.root_path)
-        return index
+    def build(
+        cls, root_path: Path, *, workspace: LedgerWorkspace | None = None
+    ) -> SourceLedgerIndex:
+        try:
+            index = cls(root_path, workspace or LedgerWorkspace.capture(root_path))
+            index._index_file(index.root_path)
+            return index
+        except LedgerWorkspaceError as exc:
+            raise SnapshotBuildError(str(exc)) from exc
 
     @property
     def entry_blocks(self) -> dict[tuple[str, int, str], SourceBlock]:
@@ -70,50 +80,38 @@ class SourceLedgerIndex:
             entry_blocks[block.origin_key] = block
         return entry_blocks
 
-    def _ensure_inside_ledger_root(self, path: Path) -> Path:
-        if path.is_symlink():
-            raise SnapshotBuildError(f"Symlink source include is not exportable: {path}")
-        resolved_path = path.resolve()
-        try:
-            resolved_path.relative_to(self.ledger_root)
-        except ValueError as exc:
-            raise SnapshotBuildError(
-                f"Included source file escapes ledger root: {path}"
-            ) from exc
-        return resolved_path
-
     def _include_paths(self, current_path: Path, include_pattern: str) -> list[Path]:
-        requested_path = Path(include_pattern)
-        if requested_path.is_absolute() or ".." in requested_path.parts:
-            raise SnapshotBuildError(f"Unsafe source include path: {include_pattern}")
+        relative = current_path.relative_to(self.ledger_root)
+        return [
+            self.ledger_root / included
+            for included in self.workspace._included_paths(relative, include_pattern)
+        ]
 
-        matches = sorted(current_path.parent.glob(include_pattern))
-        if not matches:
-            raise SnapshotBuildError(f"Included source file not found: {include_pattern}")
-        paths = []
-        for match in matches:
-            resolved = self._ensure_inside_ledger_root(match)
-            if not resolved.is_file():
-                raise SnapshotBuildError(f"Included source path is not a file: {include_pattern}")
-            paths.append(resolved)
-        return paths
-
-    def _parse_entries(self, path: Path) -> dict[int, object]:
-        entries, errors, _ = parser.parse_file(str(path))
+    def _parse_entries(self, path: Path) -> tuple[dict[int, object], dict]:
+        entries, errors, options = parser.parse_string(
+            self.workspace._files[path.relative_to(self.ledger_root)],
+            report_filename=str(path),
+        )
         if errors:
             raise SnapshotBuildError(
                 f"Source file could not be indexed: {path.name}: "
                 + "; ".join(str(error) for error in errors)
             )
-        return {entry.meta["lineno"]: entry for entry in entries}
+        return {entry.meta["lineno"]: entry for entry in entries}, options
 
     def _split_blocks(self, path: Path) -> list[tuple[int, str]]:
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        starts = [
-            line_number
-            for line_number, line in enumerate(lines, start=1)
-            if DIRECTIVE_START_RE.match(line)
-        ]
+        source = self.workspace._files[path.relative_to(self.ledger_root)]
+        lines = source.decode("utf-8").splitlines(keepends=True)
+        starts = []
+        at_line_start = True
+        # The lexer keeps directive-looking text inside multiline strings opaque.
+        for token, lineno, _, _ in lexer.lex_iter_string(source):
+            if token == "EOL":
+                at_line_start = True
+            elif at_line_start:
+                at_line_start = False
+                if token in DIRECTIVE_TOKENS:
+                    starts.append(lineno)
         blocks: list[tuple[int, str]] = []
         if starts and starts[0] > 1:
             blocks.append((1, "".join(lines[: starts[0] - 1])))
@@ -126,14 +124,15 @@ class SourceLedgerIndex:
         return blocks
 
     def _index_file(self, path: Path) -> None:
-        path = self._ensure_inside_ledger_root(path)
         if path in self._active_stack:
             raise SnapshotBuildError(f"Cyclic include in ledger source: {path.name}")
 
         self._active_stack.append(path)
         try:
             relative_path = path.relative_to(self.ledger_root).as_posix()
-            entries_by_line = self._parse_entries(path)
+            entries_by_line, options = self._parse_entries(path)
+            includes = iter(options["include"])
+            plugins = iter(options["plugin"])
             for lineno, text in self._split_blocks(path):
                 stripped = text.lstrip()
                 include_match = INCLUDE_RE.match(stripped)
@@ -143,12 +142,12 @@ class SourceLedgerIndex:
                     self.blocks.append(
                         SourceBlock(path, relative_path, lineno, "include", text)
                     )
-                    for included_path in self._include_paths(path, include_match.group(1)):
+                    for included_path in self._include_paths(path, next(includes)):
                         self._index_file(included_path)
                     continue
 
                 if plugin_match:
-                    plugin_name = plugin_match.group(1)
+                    plugin_name, _ = next(plugins)
                     self.plugin_names.add(plugin_name)
                     self.blocks.append(
                         SourceBlock(
@@ -157,7 +156,6 @@ class SourceLedgerIndex:
                             lineno,
                             "plugin",
                             text,
-                            plugin_name=plugin_name,
                         )
                     )
                     continue
@@ -165,7 +163,9 @@ class SourceLedgerIndex:
                 entry = entries_by_line.get(lineno)
                 if entry is not None:
                     self.blocks.append(
-                        SourceBlock(path, relative_path, lineno, "entry", text, entry=entry)
+                        SourceBlock(
+                            path, relative_path, lineno, "entry", text, entry=entry
+                        )
                     )
                     continue
 

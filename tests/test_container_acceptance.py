@@ -91,12 +91,14 @@ def _container_logs():
         return None
 
 
-def _get(path, params=None, authorization: str | None = f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None):
+def _get(path, params=None, authorization: str | None = f"Bearer {AUTH_CREDENTIAL}", method="GET", data=None, host=None):
     url = f"http://127.0.0.1:{HOST_PORT}{path}"
     if params:
         qs = "&".join(f"{k}={quote(v)}" for k, v in params.items())
         url = f"{url}?{qs}"
     headers = {} if authorization is None else {"Authorization": authorization}
+    if host is not None:
+        headers["Host"] = host
     if data is not None:
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, headers=headers, method=method, data=data)
@@ -137,6 +139,28 @@ class TestContainerAcceptance:
         assert status == 200
         assert body == '"pong"'
 
+    @pytest.mark.parametrize("path", ["/hello", "/shutdown"])
+    def test_removed_endpoints_return_404(self, path):
+        status, body = _get(path)
+        assert status == 404
+        assert json.loads(body) == {"detail": "Not Found"}
+
+    def test_missing_beancount_file_container_refuses_startup(self):
+        name = f"{CONTAINER_NAME}-missing-beancount-file"
+        try:
+            result = subprocess.run(
+                ["docker", "run", "--name", name, "--network", "none",
+                 "-e", "BEANCOUNT_FILE=", "-e", "CASHIER_API_TOKEN", IMAGE_TAG],
+                check=False, capture_output=True, text=True, timeout=30,
+                env={**os.environ, "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
+            )
+            assert result.returncode == 1, result.stdout + result.stderr
+            assert "BEANCOUNT_FILE must be configured" in result.stderr
+            assert "Uvicorn running" not in result.stdout + result.stderr
+            assert AUTH_CREDENTIAL not in result.stdout + result.stderr
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
+
     def test_health_ok(self):
         status, body = _get("/health", authorization=None)
         assert status == 200
@@ -150,13 +174,129 @@ class TestContainerAcceptance:
         ("/ping", "GET", None),
         ("/infrastructure?file_path=main.bean", "GET", None),
         ("/xact", "POST", b'{"transactions": []}'),
-        ("/shutdown", "GET", None),
+        ("/reload", "GET", None),
     ])
     def test_invalid_auth_rejected(self, authorization, path, method, data):
         status, body = _get(path, authorization=authorization, method=method, data=data)
         assert status == 401
         assert json.loads(body) == {"detail": "Invalid or missing API token"}
         assert AUTH_CREDENTIAL not in body
+
+    @pytest.mark.parametrize("host", ["testserver/health?", "testserver/health#"])
+    @pytest.mark.parametrize("path,method,data", [
+        ("/infrastructure?file_path=main.bean", "GET", None),
+        ("/?query=SELECT%201", "GET", None),
+        ("/xact", "POST", b'{"transactions": []}'),
+    ])
+    def test_malformed_host_never_bypasses_authentication(self, host, path, method, data):
+        status, _ = _get(path, authorization=None, method=method, data=data, host=host)
+        assert status == 400
+
+    @pytest.mark.parametrize("query", [
+        "CREATE TABLE accounts (account str)",
+        "INSERT INTO accounts (account) VALUES ('Assets:Fake')",
+        "CREATE TABLE external (line str) USING 'csv:/outside/synthetic.txt'",
+    ])
+    def test_bql_mutations_and_external_sources_rejected(self, query):
+        status, _ = _get("/", params={"query": query})
+        assert status == 400
+        status, body = _get("/", params={"query": "SELECT account FROM #accounts LIMIT 1"})
+        assert status == 200
+        assert len(json.loads(body)) == 1
+
+    def test_pwa_payees_query_remains_available(self):
+        status, body = _get("/", params={
+            "query": "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee LIMIT 10",
+        })
+        assert status == 200
+        assert json.loads(body)
+
+    def test_infrastructure_rejects_hidden_nonledger_paths(self):
+        status, _ = _get("/infrastructure", params={"file_path": ".env"})
+        assert status == 403
+        status, _ = _get("/infrastructure", params={"file_path": "credentials.txt"})
+        assert status == 403
+
+    def test_writeback_on_single_writable_file_mount(self, tmp_path):
+        """Exercise the deployed ro-directory/rw-file boundary with the nonroot image."""
+        root = tmp_path / "ledger"
+        root.mkdir(mode=0o755)
+        book = root / "main.bean"
+        book.write_text(
+            '2024-01-01 open Assets:Cash USD\n'
+            '2024-01-01 open Expenses:Food USD\n'
+            'include "manual_transactions.bean"\n', encoding="utf-8",
+        )
+        book.chmod(0o644)
+        manual = root / "manual_transactions.bean"
+        manual.write_text("; retain this source comment\n", encoding="utf-8")
+        manual.chmod(0o666)  # Synthetic fixture only: permit the container's app UID.
+        before = {path.name: path.read_bytes() for path in root.iterdir()}
+        name = f"{CONTAINER_NAME}-writeback"
+        transaction = (
+            '2026-05-28 * "Shop" "Lunch"\n'
+            '  cashier_id: "container-writeback-security"\n'
+            '  Assets:Cash -5 USD\n'
+            '  Expenses:Food 5 USD\n'
+        )
+        try:
+            subprocess.run(
+                ["docker", "run", "-d", "--name", name,
+                 "-p", "127.0.0.1::3000", "-v", f"{root}:/workspace:ro",
+                 "-v", f"{manual}:/workspace/manual_transactions.bean:rw",
+                 "-e", "BEANCOUNT_FILE=/workspace/main.bean",
+                 "-e", "BEANCOUNT_MANUAL_TRANSACTIONS_FILE=/workspace/manual_transactions.bean",
+                 "-e", "CASHIER_API_TOKEN", IMAGE_TAG],
+                check=True, capture_output=True, timeout=30,
+                env={**os.environ, "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
+            )
+            binding = subprocess.run(
+                ["docker", "port", name, "3000/tcp"],
+                check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            port = int(binding.rsplit(":", 1)[1])
+
+            def request(path, payload=None):
+                data = json.dumps(payload).encode() if payload is not None else None
+                headers = {"Authorization": f"Bearer {AUTH_CREDENTIAL}"}
+                if data is not None:
+                    headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    assert response.status == 200
+                    return json.load(response)
+
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    assert request("/health")["beancount_loaded"] is True
+                    break
+                except (urllib.error.URLError, ConnectionError, OSError):
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.2)
+            expected = {"synchronized": ["container-writeback-security"], "rejected": []}
+            assert request("/xact", {"transactions": [transaction, transaction]}) == expected
+            committed = manual.read_bytes()
+            assert committed.startswith(before[manual.name])
+            assert committed.count(b"container-writeback-security") == 1
+            assert request("/xact", {"transactions": [transaction]}) == expected
+            assert manual.read_bytes() == committed
+            assert request("/?query=" + quote("SELECT payee FROM transactions")) == [["Shop"]]
+            pulled = request("/infrastructure?file_path=main.bean")["content"]
+            assert 'cashier_id: "container-writeback-security"' in pulled
+            assert '"Shop" "Lunch"' in pulled
+            assert {path.name for path in root.iterdir()} == set(before)
+            assert book.read_bytes() == before[book.name]
+            boundary = subprocess.run(
+                ["docker", "exec", name, "/app/.venv/bin/python", "-c",
+                 "from pathlib import Path; Path('/workspace/forbidden.bean').write_text('not allowed')"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            assert boundary.returncode != 0
+            assert "Read-only file system" in boundary.stderr
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
 
     def test_missing_token_container_refuses_startup(self):
         name = f"{CONTAINER_NAME}-missing-token"

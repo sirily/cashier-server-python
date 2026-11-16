@@ -8,8 +8,7 @@ import re
 from decimal import Decimal
 from io import StringIO
 
-from beancount.core import amount, data, inventory
-from beancount.core.position import Cost, CostSpec
+from beancount.core import amount, data
 from beancount.parser import printer
 
 TEXTUAL_METADATA_KEY_RE = re.compile(r"^[a-z][A-Za-z0-9_-]*$")
@@ -17,7 +16,7 @@ TEXTUAL_METADATA_KEY_RE = re.compile(r"^[a-z][A-Za-z0-9_-]*$")
 
 def pwa_metadata_key(key: str, existing_keys: set[str]) -> str:
     """Return a textual-Beancount-compatible metadata key for PWA export."""
-    if TEXTUAL_METADATA_KEY_RE.match(key) and not key.startswith("_"):
+    if TEXTUAL_METADATA_KEY_RE.match(key):
         return key
 
     safe_suffix = re.sub(r"[^A-Za-z0-9_-]", "_", key.lstrip("_"))
@@ -37,8 +36,6 @@ def canonicalize_metadata_value_for_pwa(value):
         return value.value
     if isinstance(value, (str, Decimal, int, float, datetime.date, amount.Amount, bool)) or value is None:
         return value
-    if isinstance(value, (inventory.Inventory, Cost, CostSpec)):
-        return str(value)
     return str(value)
 
 
@@ -48,7 +45,7 @@ def canonicalize_metadata_for_pwa(meta: dict) -> dict:
     reserved_keys = {
         key
         for key in meta
-        if TEXTUAL_METADATA_KEY_RE.match(key) and not key.startswith("_")
+        if TEXTUAL_METADATA_KEY_RE.match(key)
     }
     for key, value in meta.items():
         canonical_key = pwa_metadata_key(key, reserved_keys | set(canonical_meta.keys()))

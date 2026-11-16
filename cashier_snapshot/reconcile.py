@@ -174,5 +174,3 @@ def classify_source_entries(
         )
 
     return retained_indices, transformed_indices
-
-    return retained_indices, transformed_indices

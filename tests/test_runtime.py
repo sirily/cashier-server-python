@@ -1,66 +1,51 @@
-"""Runtime helpers must preserve responses without blocking the event loop."""
-
+"""Runtime configuration and Beancount-only request handling."""
 
 import re
 import subprocess
 import sys
-import threading
-from pathlib import Path
 
 import pytest
 import uvicorn
+from fastapi.testclient import TestClient
 
 import main
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("query", [None, ""])
-async def test_ledger_without_query_does_not_run_subprocess(monkeypatch, query):
+@pytest.mark.parametrize("path", ["/", "/reload"])
+@pytest.mark.parametrize("bean_file", [None, ""])
+def test_missing_beancount_configuration_never_starts_ledger(monkeypatch, path, bean_file):
     def unexpected_run(*args, **kwargs):
-        pytest.fail("Empty queries must not start Ledger")
+        pytest.fail("The server must never start Ledger CLI")
 
+    monkeypatch.setattr(main, "BEAN_FILE", bean_file)
+    monkeypatch.setattr(main, "CASHIER_API_TOKEN", "test-api-token")
     monkeypatch.setattr(subprocess, "run", unexpected_run)
-    assert await main.ledger(query) == {"error": "No query provided"}
+    client = TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
+
+    response = client.get(path, params={"query": "SELECT 1"})
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "BEANCOUNT_FILE must be configured"}
 
 
+@pytest.mark.parametrize("bean_file", [None, ""])
+def test_server_refuses_to_start_without_beancount_file(monkeypatch, bean_file):
+    def unexpected_start(*args, **kwargs):
+        pytest.fail("An unconfigured server must not load data or start Uvicorn")
+
+    monkeypatch.setattr(main, "CASHIER_API_TOKEN", "test-api-token")
+    monkeypatch.setattr(main, "BEAN_FILE", bean_file)
+    monkeypatch.setattr(main, "preload_beancount_data", unexpected_start)
+    monkeypatch.setattr(uvicorn, "Server", unexpected_start)
+
+    with pytest.raises(RuntimeError, match="BEANCOUNT_FILE must be configured"):
+        main.main()
+
+
+@pytest.mark.parametrize("query", [None, ""])
 @pytest.mark.asyncio
-async def test_ledger_runs_in_worker_and_returns_output_lines(monkeypatch):
-    event_loop_thread = threading.get_ident()
-
-    def run(command, **kwargs):
-        assert threading.get_ident() != event_loop_thread
-        assert command == ["ledger", "balance", "Assets"]
-        assert kwargs == {
-            "capture_output": True, "text": True, "check": True, "encoding": "utf-8",
-        }
-        return subprocess.CompletedProcess(command, 0, stdout="Assets:Cash 10 USD\nTotal 10 USD\n")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert await main.ledger("balance Assets") == ["Assets:Cash 10 USD", "Total 10 USD"]
-
-
-@pytest.mark.asyncio
-async def test_ledger_preserves_command_error_response(monkeypatch):
-    error = subprocess.CalledProcessError(1, ["ledger", "balance"], stderr="Invalid ledger")
-
-    def fail(*args, **kwargs):
-        raise error
-
-    monkeypatch.setattr(subprocess, "run", fail)
-    assert await main.ledger("balance") == {"error": str(error), "stderr": "Invalid ledger"}
-
-
-@pytest.mark.asyncio
-async def test_hello_reads_in_worker_and_returns_base64(monkeypatch):
-    event_loop_thread = threading.get_ident()
-
-    def read_bytes(path):
-        assert threading.get_ident() != event_loop_thread
-        assert path == Path("hello.png")
-        return b"image bytes"
-
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    assert await main.hello_img() == "aW1hZ2UgYnl0ZXM="
+async def test_query_required(query):
+    assert await main.index(query) == {"error": "No query provided"}
 
 
 @pytest.mark.parametrize("key,cert,expected", [
@@ -72,6 +57,7 @@ async def test_hello_reads_in_worker_and_returns_base64(monkeypatch):
 def test_server_passes_explicit_tls_options(monkeypatch, key, cert, expected):
     configs: list[uvicorn.Config] = []
     started: list[bool] = []
+    connection = object()
 
     class Server:
         def __init__(self, config: uvicorn.Config):
@@ -81,15 +67,17 @@ def test_server_passes_explicit_tls_options(monkeypatch, key, cert, expected):
             started.append(True)
 
     monkeypatch.setattr(main, "CASHIER_API_TOKEN", "test-api-token")
-    monkeypatch.setattr(main, "BEAN_FILE", None)
+    monkeypatch.setattr(main, "BEAN_FILE", "test.bean")
+    monkeypatch.setattr(main, "preload_beancount_data", lambda: connection)
+    monkeypatch.setattr(main.app.state, "connection", None, raising=False)
     monkeypatch.setattr(main, "CASHIER_SSL_KEY", key)
     monkeypatch.setattr(main, "CASHIER_SSL_CERT", cert)
     monkeypatch.setattr(uvicorn, "Server", Server)
-    monkeypatch.setattr(main.app.state, "server", None, raising=False)
 
     main.main()
 
     assert started == [True]
+    assert main.app.state.connection is connection
     assert len(configs) == 1
     assert (configs[0].ssl_keyfile, configs[0].ssl_certfile) == expected
     assert configs[0].host == "0.0.0.0"

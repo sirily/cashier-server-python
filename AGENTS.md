@@ -26,6 +26,14 @@ Cashier Server Python is the API/server component for Cashier.
 - Do not commit, push, merge, tag, publish, or deploy without the owner's corresponding request. Do not assign RC numbers manually.
 - Release automation lives in `.github/workflows/` and `scripts/release.mjs`; run the release regression tests before changing publication behavior. Final publication follows squash-merge of a same-repository release PR into `main`.
 
+## Pull request descriptions
+
+- Describe what changed, why it matters, related issues, and relevant behavior, compatibility, migration, or security consequences.
+- Never include routine validation reports: test counts, passed/skipped totals, check commands, lint/type-check results, CI status, build results, or audit scorecards. Those belong in CI logs and checks, not the PR description.
+- Never include conversation or agent narration, attribution such as "the user requested/said", or references to instructions and approvals.
+- Never list actions that were not performed, such as "not tested", "not committed", "not merged", "not deployed", or "no RC was published". Do not add administrative disclaimers about what the PR authorizes.
+- Keep the description focused on the resulting software. Explain actual product limitations and required migration steps directly rather than narrating the development process.
+
 ## Architecture docs
 
 - Current architecture docs are in `/docs/architecture/`.

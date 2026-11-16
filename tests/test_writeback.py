@@ -287,12 +287,15 @@ def test_include_directive_rejected(configured_env):
 
 
 def test_no_temp_files_in_ledger_workspace(configured_env, monkeypatch):
-    """Assert commit does not create temp files in the ledger workspace.
-
-    Monkeypatches tempfile.mkstemp to fail: the corrected implementation must
-    not call mkstemp(dir=ledger_workspace) for the commit path.
-    """
+    """Only the manual file may change; no extra workspace paths may remain."""
     import tempfile as tf
+
+    manual_file = Path(configured_env)
+    workspace = manual_file.parent
+    before = {
+        path.relative_to(workspace): path.read_bytes() if path.is_file() else None
+        for path in workspace.rglob("*")
+    }
 
     def failing_mkstemp(*args, **kwargs):
         raise RuntimeError("mkstemp should not be called during commit")
@@ -308,21 +311,34 @@ def test_no_temp_files_in_ledger_workspace(configured_env, monkeypatch):
     response = client.post("/xact", json={"transactions": [text]})
     assert response.status_code == 200
     assert response.json()["synchronized"] == ["abc-123"]
+    after = {
+        path.relative_to(workspace): path.read_bytes() if path.is_file() else None
+        for path in workspace.rglob("*")
+    }
+    assert after.keys() == before.keys()
+    manual_relative = manual_file.relative_to(workspace)
+    assert after[manual_relative] != before[manual_relative]
+    assert {path: content for path, content in after.items() if path != manual_relative} == {
+        path: content for path, content in before.items() if path != manual_relative
+    }
 
 
-def test_commit_opens_manual_file_in_append_mode(configured_env, monkeypatch):
-    """Writeback must not truncate the single mounted manual file before writing."""
-    import builtins
+def test_commit_uses_pinned_append_descriptor(configured_env, monkeypatch):
+    """Commit must append on the existing mounted inode, without reopening it."""
+    import fcntl
 
-    original_open = builtins.open
-    modes = []
+    import writeback
 
-    def tracking_open(file, mode="r", *args, **kwargs):
-        if os.fspath(file) == configured_env:
-            modes.append(mode)
-        return original_open(file, mode, *args, **kwargs)
+    original_write = writeback._write_file_crash_conscious
+    original_inode = Path(configured_env).stat().st_ino
+    flags = []
 
-    monkeypatch.setattr(builtins, "open", tracking_open)
+    def tracking_write(fd, previous_content, candidate_content):
+        assert os.fstat(fd).st_ino == original_inode
+        flags.append(fcntl.fcntl(fd, fcntl.F_GETFL))
+        return original_write(fd, previous_content, candidate_content)
+
+    monkeypatch.setattr(writeback, "_write_file_crash_conscious", tracking_write)
 
     text = (
         '2026-05-28 * "Coffee"\n'
@@ -333,23 +349,24 @@ def test_commit_opens_manual_file_in_append_mode(configured_env, monkeypatch):
     response = client.post("/xact", json={"transactions": [text]})
     assert response.status_code == 200
     assert response.json()["synchronized"] == ["abc-123"]
-    assert "a" in modes
-    assert "w" not in modes
+    assert len(flags) == 1
+    assert flags[0] & os.O_APPEND
+    assert not flags[0] & os.O_TRUNC
+    assert Path(configured_env).stat().st_ino == original_inode
 
 
-def test_full_ledger_validation_uses_temp_copy(configured_env, monkeypatch):
-    """Prove /xact invokes full-ledger validation on a copied root,
-    not only parser.parse_string(candidate)."""
+def test_full_ledger_validation_uses_immutable_capture(configured_env, monkeypatch):
+    """Every loader validation uses a materialized capture, never live sources."""
     import writeback
 
-    original_load_file = writeback.loader.load_file
+    original_load_file = writeback.loader._uncached_load_file
     validation_paths = []
 
     def tracking_load_file(path, *args, **kwargs):
         validation_paths.append(str(path))
         return original_load_file(path, *args, **kwargs)
 
-    monkeypatch.setattr(writeback.loader, "load_file", tracking_load_file)
+    monkeypatch.setattr(writeback.loader, "_uncached_load_file", tracking_load_file)
 
     text = (
         '2026-05-28 * "Coffee"\n'
@@ -361,17 +378,15 @@ def test_full_ledger_validation_uses_temp_copy(configured_env, monkeypatch):
     assert response.status_code == 200
     assert response.json()["synchronized"] == ["abc-123"]
 
-    # load_file should have been called at least twice:
-    # 1. _load_full_ledger() on the original BEANCOUNT_FILE
-    # 2. _validate_candidate_as_full_ledger() on a temp copy
-    assert len(validation_paths) >= 2
-
-    # At least one call must be to a path different from the original
-    bean_file = os.environ["BEANCOUNT_FILE"]
-    temp_copy_calls = [p for p in validation_paths if p != bean_file]
-    assert len(temp_copy_calls) >= 1, (
-        "Expected load_file to be called on a temp copy (not the original BEANCOUNT_FILE)"
-    )
+    # Baseline, per-entry and final validation reuse one captured source tree.
+    # The endpoint's post-commit cache refresh may separately load the live root.
+    workspace = Path(configured_env).parent
+    staged = [p for p in validation_paths if not Path(p).is_relative_to(workspace)]
+    assert len(staged) >= 3
+    assert len(set(staged)) == 1
+    assert all(Path(p).name == "main.bean" for p in staged)
+    assert all(p.startswith("/proc/self/fd/") for p in staged)
+    assert not Path(staged[0]).exists()
 
 
 def test_existing_manual_parse_error_fails_closed(configured_env):
@@ -428,8 +443,8 @@ def test_write_permission_error_returns_json_500(configured_env, monkeypatch):
     """Filesystem write failures should be controlled JSON errors, not tracebacks."""
     import writeback
 
-    def failing_write(filepath, previous_content, candidate_content):
-        raise PermissionError(13, "Permission denied", filepath)
+    def failing_write(fd, previous_content, candidate_content):
+        raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(writeback, "_write_file_crash_conscious", failing_write)
 
