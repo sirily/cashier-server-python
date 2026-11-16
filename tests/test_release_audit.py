@@ -442,6 +442,7 @@ def test_summary_write_failure_blocks_after_all_scans(tmp_path, capsys):
 def test_no_image_or_summary_still_audits_dependencies_and_discloses_omission(
     tmp_path, monkeypatch, capsys,
 ):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     runner = FakeRunner()
     assert invoke(tmp_path, runner, image=False, summary=False) == 0
