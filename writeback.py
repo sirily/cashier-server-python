@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from beancount import loader
 from beancount.core import data, display_context
-from beancount.parser import grammar, parser
+from beancount.parser import grammar
 from beancount.parser.printer import EntryPrinter
 from loguru import logger
 
@@ -54,11 +54,22 @@ MAX_METADATA_STRING_BYTES = 1024
 MAX_CASHIER_ID_LENGTH = 128
 
 _MARKER = b"; cashier-writeback-v1 "
+_TOTAL_PRICE = "__cashier_total_price__"
 # If even recovery fails, no later request in this worker may report success.
 _recovery_failures: set[tuple[int, int]] = set()
 
 
-class _TransactionBuilder(grammar.Builder):
+class _TotalPriceBuilder(grammar.Builder):
+    """Retain the exact total before Beancount divides it into a unit price."""
+
+    def posting(self, filename, lineno, account, units, cost, price, istotal, flag):
+        posting = super().posting(filename, lineno, account, units, cost, price, istotal, flag)
+        if istotal:
+            posting = posting._replace(meta={**(posting.meta or {}), _TOTAL_PRICE: price})
+        return posting
+
+
+class _TransactionBuilder(_TotalPriceBuilder):
     """Reject directives which normally vanish into parser options/state."""
 
     def __init__(self):
@@ -126,13 +137,25 @@ class _TransactionBuilder(grammar.Builder):
         self._reject_control(filename, lineno)
 
 
-def _parse_transaction(text: str):
+def _parse_source(text: str, builder: grammar.Builder):
     # parse_string creates its own Builder; passing builder= through **kw is not
-    # supported by the C parser. Use that same parser with our restricted builder.
-    builder = _TransactionBuilder()
+    # supported by the C parser. Use that same parser with our own builder.
     c_parser = import_module("beancount.parser._parser")
     c_parser.Parser(builder).parse(io.BytesIO(text.encode("utf-8")), filename="<cashier>")
     return builder.finalize()
+
+
+def _parse_transaction(text: str):
+    return _parse_source(text, _TransactionBuilder())
+
+
+class _WritebackPrinter(EntryPrinter):
+    def render_posting_strings(self, posting):
+        total = (posting.meta or {}).get(_TOTAL_PRICE)
+        if total is None:
+            return super().render_posting_strings(posting)
+        account, position, weight = super().render_posting_strings(posting._replace(price=None))
+        return account, position + " @@ " + total.to_string(self.dformat_max), weight
 
 
 def _get_manual_transactions_file() -> str | None:
@@ -389,7 +412,7 @@ def _normalize_entry(entry: data.Transaction) -> str:
         postings=[posting._replace(meta=dict(sorted((posting.meta or {}).items()))) for posting in entry.postings],
     )
     try:
-        rendered = EntryPrinter(dcontext=display_context.DisplayContext())(ordered)
+        rendered = _WritebackPrinter(dcontext=display_context.DisplayContext())(ordered)
         entries, errors, _ = _parse_transaction(rendered)
         if (
             errors or len(entries) != 1 or not isinstance(entries[0], data.Transaction)
@@ -504,7 +527,7 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
         previous_bytes = _read_manual_transactions_bytes(fd)
         _check_writeback_integrity(previous_bytes)
         existing_content = previous_bytes.decode("utf-8")
-        existing_manual_entries, existing_errors, _ = parser.parse_string(existing_content)
+        existing_manual_entries, existing_errors, _ = _parse_source(existing_content, _TotalPriceBuilder())
         if existing_errors:
             raise RuntimeError(
                 "Existing manual transactions file has parse errors; refusing to write: "

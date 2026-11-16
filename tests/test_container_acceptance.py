@@ -217,13 +217,23 @@ class TestContainerAcceptance:
         status, _ = _get("/infrastructure", params={"file_path": "credentials.txt"})
         assert status == 403
 
-    def test_writeback_on_single_writable_file_mount(self, tmp_path):
+    @pytest.mark.parametrize("account,amount,expense_amount", [
+        pytest.param("Assets:Cash", "-5 USD", "5 USD", id="single-currency"),
+        pytest.param("Assets:Foreign", "-3 GBP @@ 1.00 USD", "1.00 USD", id="total-price"),
+        pytest.param(
+            "Assets:Foreign", "-3 GBP @@ 0.1234567890123456789012345678 USD",
+            "0.1234567890123456789012345678 USD", id="high-precision-total-price",
+        ),
+        pytest.param("Assets:Foreign", "-3 GBP @ 0.50 USD", "1.50 USD", id="unit-price"),
+    ])
+    def test_writeback_on_single_writable_file_mount(self, tmp_path, account, amount, expense_amount):
         """Exercise the deployed ro-directory/rw-file boundary with the nonroot image."""
         root = tmp_path / "ledger"
         root.mkdir(mode=0o755)
         book = root / "main.bean"
         book.write_text(
             '2024-01-01 open Assets:Cash USD\n'
+            '2024-01-01 open Assets:Foreign GBP\n'
             '2024-01-01 open Expenses:Food USD\n'
             'include "manual_transactions.bean"\n', encoding="utf-8",
         )
@@ -236,8 +246,8 @@ class TestContainerAcceptance:
         transaction = (
             '2026-05-28 * "Shop" "Lunch"\n'
             '  cashier_id: "container-writeback-security"\n'
-            '  Assets:Cash -5 USD\n'
-            '  Expenses:Food 5 USD\n'
+            f'  {account} {amount}\n'
+            f'  Expenses:Food {expense_amount}\n'
         )
         try:
             subprocess.run(
@@ -280,12 +290,32 @@ class TestContainerAcceptance:
             committed = manual.read_bytes()
             assert committed.startswith(before[manual.name])
             assert committed.count(b"container-writeback-security") == 1
-            assert request("/xact", {"transactions": [transaction]}) == expected
-            assert manual.read_bytes() == committed
-            assert request("/?query=" + quote("SELECT payee FROM transactions")) == [["Shop"]]
+            posting_pattern = rf"^\s+{re.escape(account)}\s+{re.escape(amount)}$"
+            assert re.search(posting_pattern, committed.decode("utf-8"), re.MULTILINE)
             pulled = request("/infrastructure?file_path=main.bean")["content"]
             assert 'cashier_id: "container-writeback-security"' in pulled
             assert '"Shop" "Lunch"' in pulled
+            assert re.search(posting_pattern, pulled, re.MULTILINE)
+            assert request("/xact", {"transactions": [transaction]}) == expected
+            assert manual.read_bytes() == committed
+            assert request("/infrastructure?file_path=main.bean")["content"] == pulled
+            assert request("/?query=" + quote("SELECT payee FROM transactions")) == [["Shop"]]
+            result = subprocess.run(
+                ["node", "--input-type=module", "-e", '''
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { initSync, Ledger } from "@rustledger/wasm";
+
+initSync({ module: readFileSync("node_modules/@rustledger/wasm/rustledger_wasm_bg.wasm") });
+const content = readFileSync(0, "utf8");
+const ledger = Ledger.fromFiles({ "main.bean": content }, "main.bean");
+const errors = ledger.getErrors();
+assert.equal(errors.length, 0, JSON.stringify(errors));
+'''],
+                cwd=os.path.join(os.path.dirname(__file__), "acceptance"),
+                input=pulled, check=False, text=True, capture_output=True, timeout=30,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
             assert {path.name for path in root.iterdir()} == set(before)
             assert book.read_bytes() == before[book.name]
             boundary = subprocess.run(
