@@ -54,6 +54,47 @@ def test_api_fails_closed_when_token_is_not_configured(monkeypatch):
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize("path", ["/ping", "/xact", "/infrastructure"])
+def test_cors_preflight_does_not_bypass_authentication(configured_api_token, path):
+    response = client.options(
+        path,
+        headers={
+            "Authorization": "",
+            "Origin": "https://other.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert not any(name.startswith("access-control-") for name in response.headers)
+
+
+@pytest.mark.parametrize("path", ["/ping", "/health", "/xact"])
+def test_authenticated_preflight_is_not_supported(configured_api_token, path):
+    response = client.options(
+        path,
+        headers={
+            **configured_api_token,
+            "Origin": "https://other.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 405
+    assert not any(name.startswith("access-control-") for name in response.headers)
+
+
+@pytest.mark.parametrize("origin", ["http://testserver", "https://other.example", "null"])
+def test_origin_does_not_grant_cors_permissions(configured_api_token, origin):
+    response = client.get("/ping", headers={**configured_api_token, "Origin": origin})
+
+    assert response.status_code == 200
+    assert response.json() == "pong"
+    assert not any(name.startswith("access-control-") for name in response.headers)
+
+
 def test_server_refuses_to_start_without_token(monkeypatch):
     monkeypatch.setattr(main, "CASHIER_API_TOKEN", "")
 

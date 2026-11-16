@@ -48,13 +48,7 @@ async def test_query_required(query):
     assert await main.index(query) == {"error": "No query provided"}
 
 
-@pytest.mark.parametrize("key,cert,expected", [
-    (None, None, (None, None)),
-    ("key.pem", None, (None, None)),
-    (None, "cert.pem", (None, None)),
-    ("key.pem", "cert.pem", ("key.pem", "cert.pem")),
-])
-def test_server_passes_explicit_tls_options(monkeypatch, key, cert, expected):
+def test_server_preloads_dataset_and_starts_internal_http_listener(monkeypatch):
     configs: list[uvicorn.Config] = []
     started: list[bool] = []
     connection = object()
@@ -70,8 +64,7 @@ def test_server_passes_explicit_tls_options(monkeypatch, key, cert, expected):
     monkeypatch.setattr(main, "BEAN_FILE", "test.bean")
     monkeypatch.setattr(main, "preload_beancount_data", lambda: connection)
     monkeypatch.setattr(main.app.state, "connection", None, raising=False)
-    monkeypatch.setattr(main, "CASHIER_SSL_KEY", key)
-    monkeypatch.setattr(main, "CASHIER_SSL_CERT", cert)
+
     monkeypatch.setattr(uvicorn, "Server", Server)
 
     main.main()
@@ -79,7 +72,8 @@ def test_server_passes_explicit_tls_options(monkeypatch, key, cert, expected):
     assert started == [True]
     assert main.app.state.connection is connection
     assert len(configs) == 1
-    assert (configs[0].ssl_keyfile, configs[0].ssl_certfile) == expected
+    assert configs[0].is_ssl is False
+    assert configs[0].limit_concurrency == 64
     assert configs[0].host == "0.0.0.0"
     assert configs[0].port == 3000
 

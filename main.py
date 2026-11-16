@@ -13,7 +13,6 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -38,33 +37,13 @@ logger.configure(handlers=[{"sink": sys.stderr, "diagnose": False, "backtrace": 
 
 load_dotenv()
 BEAN_FILE = os.getenv("BEANCOUNT_FILE")
-CASHIER_SSL_KEY = os.getenv("CASHIER_SSL_KEY")
-CASHIER_SSL_CERT = os.getenv("CASHIER_SSL_CERT")
 CASHIER_API_TOKEN = os.getenv("CASHIER_" + "API_TOKEN", "").strip()
-
-CASHIER_CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CASHIER_CORS_ORIGINS", "*").split(",")
-    if origin.strip()
-]
 
 # Create a FastAPI instance
 app = FastAPI(
     title="Cashier Server",
     description="Beancount synchronization server for Cashier PWA",
     version="0.14.0",
-)
-
-# Configure CORS. In production the app is expected to be served same-origin
-# through a reverse proxy, but keeping this configurable preserves local-dev
-# compatibility with the original server. Credentialed CORS cannot be used with
-# a wildcard origin, so credentials are only enabled for explicit origin lists.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CASHIER_CORS_ORIGINS if CASHIER_CORS_ORIGINS else ["*"],
-    allow_credentials="*" not in CASHIER_CORS_ORIGINS,
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 
@@ -76,7 +55,7 @@ async def require_api_token(request: Request, call_next):
         return JSONResponse(status_code=400, content={"detail": "Invalid Host header"})
 
     # Never reconstruct the authentication path from the attacker-controlled Host.
-    if request.method == "OPTIONS" or request.scope.get("path") == "/health":
+    if request.scope.get("path") == "/health":
         return await call_next(request)
 
     if not CASHIER_API_TOKEN:
@@ -453,13 +432,8 @@ def main():
 
     app.state.connection = preload_beancount_data()
 
-    ssl_keyfile = ssl_certfile = None
-    if CASHIER_SSL_KEY and CASHIER_SSL_CERT:
-        ssl_keyfile, ssl_certfile = CASHIER_SSL_KEY, CASHIER_SSL_CERT
-        logger.info(f"SSL enabled: key={ssl_keyfile}, cert={ssl_certfile}")
     config = uvicorn.Config(
         app, host="0.0.0.0", port=3000,
-        ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
         limit_concurrency=64,
     )
     server = uvicorn.Server(config)

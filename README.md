@@ -19,23 +19,17 @@ Both settings are required: the server refuses to start without either one. If i
 
 Send `Authorization: Bearer <your-token>` on API requests. `/health` is available without authentication for container probes.
 
-### Configure Certificates
+### HTTPS and same-origin deployment
 
-Create a self-signed certificate with OpenSSL.
+Terminate HTTPS at the external reverse proxy and forward requests through Caddy to the server over internal HTTP. Serve the PWA and API under the same browser origin, exposing the API under `/api/`.
 
-Add `CASHIER_SSL_KEY` and `CASHIER_SSL_CERT` paths to `.env` file, pointing to generated `key.pem` and `cert.pem`.
-
-#### Android
-
-On Android, import the `cert.pem`. Usually Settings -> Security -> Install certificate -> CA Certificate.
-
-Then, open the Cashier Server URL in the browser and accept the self-signed certificate.
+The server does not load TLS certificates or provide CORS support. Direct HTTPS startup and separate-origin browser clients are no longer supported. Remove `CASHIER_SSL_KEY`, `CASHIER_SSL_CERT`, certificate/key mounts used only by this server, and `CASHIER_CORS_ORIGINS` from existing deployments; those environment variables are no longer read.
 
 ## Run
 
 Execute the `cashier-server` script provided by the `cashier-server` package.
 
-The server runs on 0.0.0.0:3000, matching the Rust implementation.
+The server listens for internal HTTP on 0.0.0.0:3000. Do not expose this port publicly.
 
 ## API Endpoints
 
@@ -48,8 +42,6 @@ The server runs on 0.0.0.0:3000, matching the Rust implementation.
 - `/xact` - Stage 2 manual transaction writeback endpoint. Deployment exposes it as `/api/xact`; it accepts only Cashier-created completed transaction directives with `cashier_id` and writes only to the configured `BEANCOUNT_MANUAL_TRANSACTIONS_FILE`.
 
 `/hello` and `/shutdown` have been removed and return `404` for authenticated requests. Stop the process through your service manager or container runtime; `CASHIER_ENABLE_SHUTDOWN` is no longer a supported setting.
-
-CORS allows all origins by default. Set `CASHIER_CORS_ORIGINS` to a comma-separated origin list to restrict it; wildcard origins do not enable credentials.
 
 ## Stage 2 manual transaction writeback
 
@@ -87,7 +79,7 @@ Writeback preserves exact total prices (`@@ 1.00 USD`) in the manual file and th
 ## Security boundaries and limits
 
 - Run the server on Linux (the supplied container is supported). Safe reads require `O_NOFOLLOW`, descriptor-relative opens and `/proc/self/fd`; writeback additionally requires POSIX `flock`. Native Windows execution is not supported by the hardened filesystem protocol.
-- Use HTTPS at the reverse proxy or configure both TLS files. Do not expose plain HTTP port 3000 publicly. Keep proxy/body/connection limits enabled and restrict CORS to the PWA origin where possible.
+- Use HTTPS at the external reverse proxy and keep HTTP port 3000 on the private proxy/container network. Serve the PWA and API same-origin; the server sends no CORS permission headers. Keep proxy/body/connection limits enabled.
 - The health exemption uses the ASGI path, never a URL reconstructed from `Host`. Malformed or duplicate Host headers are rejected; protected routes always require the bearer token.
 - BQL is a narrow read-only Sync channel, not a general query interface. Only `SELECT` with an explicit `FROM accounts` or `FROM transactions` is supported (`#accounts` and `#transactions` are also accepted). Every nested `SELECT` requires an explicit allowed source. `BALANCES`, `JOURNAL`, `PRINT`, other tables, implicit postings, expression-based `FROM`, and `OPEN`/`CLOSE`/`CLEAR` qualifiers are rejected with HTTP 400. Existing Accounts and Payees queries remain supported; clients using the removed forms must switch to the supported Sync queries. `CREATE`, `INSERT`, external data sources and mutable shared query tables remain forbidden. Writing from the PWA still uses `/xact`, not BQL.
 - BQL workers have a 5-second execution deadline, 1 GiB address-space limit, 16 KiB query/512-node AST limits, and 10,000-row/8 MiB HTTP JSON response limits (the internal worker response is bounded separately). A timeout kills and reaps the worker. Expensive operations have four admission slots per server process; excess work receives `503` rather than waiting unboundedly. The built-in entry point also limits concurrent connections to 64.
