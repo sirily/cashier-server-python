@@ -174,6 +174,41 @@ def test_heavy_admission_limit_does_not_block_health(api, monkeypatch):
         gate.release()
 
 
+def test_committed_write_keeps_admission_slot_until_cache_refresh(api, monkeypatch):
+    import writeback
+
+    gate = threading.BoundedSemaphore(1)
+    refreshed = []
+    monkeypatch.setattr(main, "_heavy_operations", gate)
+    monkeypatch.setenv("BEANCOUNT_MANUAL_TRANSACTIONS_FILE", "configured")
+    monkeypatch.setattr(writeback, "validate_and_commit", lambda texts: ({"synchronized": ["durable"], "rejected": []}, True))
+
+    def refresh():
+        acquired = gate.acquire(blocking=False)
+        if acquired:
+            gate.release()
+        assert not acquired, "Commit and refresh must own the same admission slot"
+        refreshed.append(True)
+
+    monkeypatch.setattr(main, "refresh_beancount_connection", refresh)
+    response = api.post("/xact", json={"transactions": []})
+    assert response.status_code == 200
+    assert response.json() == {"synchronized": ["durable"], "rejected": []}
+    assert refreshed == [True]
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
+def test_http_json_response_limit_rejects_repeated_large_values(api):
+    connection = main.app.state.connection
+    entries = connection.tables["entries"].entries
+    transaction = entries[-1]._replace(narration="x" * 1024)
+    connection.tables["entries"].entries = entries[:2] + [transaction] * 9000
+    response = api.get("/", params={"query": "SELECT narration FROM #transactions"})
+    assert response.status_code == 400
+    assert "HTTP JSON response exceeds byte limit" in response.json()["detail"]
+
+
 def test_client_limits_do_not_leak_tokens_in_error(api):
     response = api.get("/", params={"query": "SELECT " + "x" * (16 * 1024)})
     assert response.status_code in {400, 413}

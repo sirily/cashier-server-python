@@ -381,6 +381,35 @@ def test_worker_applies_os_limits_and_treats_query_as_json(connection, monkeypat
     assert (resource.RLIMIT_CORE, (0, 0)) in limits
 
 
+def test_http_json_limit_does_not_trust_pickle_memoization(monkeypatch):
+    rows = [("x" * 200,)] * 12
+    assert len(pickle.dumps((True, rows))) < 1024
+    assert len(json.dumps(rows, separators=(",", ":")).encode()) > 1024
+    monkeypatch.setattr(readonly, "MAX_RESPONSE_BYTES", 1024)
+    with pytest.raises(readonly.QueryRejected, match="HTTP JSON response exceeds"):
+        readonly._check_http_json_size(rows)
+
+
+@pytest.mark.parametrize("value", ["é", "\\n", '"', "\\\\"])
+def test_http_json_limit_counts_utf8_and_escaping(monkeypatch, value):
+    rows = [(value * 20,)]
+    encoded = json.dumps(rows, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+    monkeypatch.setattr(readonly, "MAX_RESPONSE_BYTES", len(encoded))
+    readonly._check_http_json_size(rows)
+    monkeypatch.setattr(readonly, "MAX_RESPONSE_BYTES", len(encoded) - 1)
+    with pytest.raises(readonly.QueryRejected, match="HTTP JSON response exceeds"):
+        readonly._check_http_json_size(rows)
+
+
+def test_http_json_limit_checked_by_real_worker(connection):
+    entries = connection.tables["entries"].entries
+    transaction = entries[-1]._replace(narration="x" * 1024)
+    connection.tables["entries"].entries = entries[:2] + [transaction] * 9000
+    assert len(pickle.dumps((entries[:2] + [transaction] * 9000, connection.tables["entries"].options))) < 64 * 1024
+    with pytest.raises(readonly.QueryRejected, match="HTTP JSON response exceeds"):
+        readonly.execute_readonly(connection, "SELECT narration FROM #transactions")
+
+
 def test_exceptions_match_public_contract():
     assert issubclass(readonly.QueryRejected, ValueError)
     assert issubclass(readonly.QueryTimeout, TimeoutError)

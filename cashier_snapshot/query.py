@@ -247,6 +247,27 @@ def execute_readonly(connection, query: str) -> list[tuple]:
                 stream.close()
 
 
+def _check_http_json_size(rows) -> None:
+    """Bound the actual FastAPI JSON shape, not pickle's memoized wire size."""
+    from beancount.core.inventory import Inventory
+    from fastapi.encoders import jsonable_encoder
+
+    # Match main.beancount's Inventory conversion and JSONResponse formatting.
+    # Encoding stays inside the resource-limited worker, including allocations
+    # made by jsonable_encoder for nested Beancount values.
+    converted = [
+        tuple(list(value) if isinstance(value, Inventory) else value for value in row)
+        for row in rows
+    ]
+    encoded = jsonable_encoder(converted)
+    encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    size = 0
+    for chunk in encoder.iterencode(encoded):
+        size += len(chunk.encode("utf-8"))
+        if size > MAX_RESPONSE_BYTES:
+            raise QueryRejected("Query HTTP JSON response exceeds byte limit")
+
+
 def _worker() -> None:
     # Applied after exec, never in preexec_fn in the threaded application.
     import resource
@@ -276,6 +297,7 @@ def _worker() -> None:
         rows = connection.execute(statement).fetchall()
         if len(rows) > MAX_ROWS:
             raise QueryRejected("Query exceeds row limit")
+        _check_http_json_size(rows)
         response = _serialize((True, rows), MAX_RESPONSE_BYTES, "response")
     except (MemoryError, RecursionError):
         response = _serialize((False, "Query exceeded worker resource limits"), MAX_RESPONSE_BYTES, "response")

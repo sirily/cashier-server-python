@@ -388,6 +388,20 @@ class XactResponse(BaseModel):
     rejected: list[XactRejected]
 
 
+def commit_and_refresh(transactions: list[str]):
+    """Keep the admission slot until a successful write is visible to BQL."""
+    from writeback import validate_and_commit
+
+    result, wrote = validate_and_commit(transactions)
+    if wrote:
+        try:
+            refresh_beancount_connection()
+        except Exception:
+            # The transaction is already durable; never report it as uncommitted.
+            logger.exception("Beancount connection refresh failed after writeback")
+    return result
+
+
 @app.post("/xact")
 async def write_xact(request: XactRequest):
     """
@@ -399,8 +413,6 @@ async def write_xact(request: XactRequest):
 
     Returns synchronized cashier_ids and any rejections with reasons.
     """
-    from writeback import validate_and_commit
-
     manual_file = os.getenv("BEANCOUNT_MANUAL_TRANSACTIONS_FILE")
     if not manual_file:
         raise HTTPException(
@@ -409,7 +421,7 @@ async def write_xact(request: XactRequest):
         )
 
     try:
-        result, wrote = await run_in_threadpool(run_heavy_operation, validate_and_commit, request.transactions)
+        result = await run_in_threadpool(run_heavy_operation, commit_and_refresh, request.transactions)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     except ValueError as exc:
@@ -417,11 +429,6 @@ async def write_xact(request: XactRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    if wrote:
-        try:
-            await run_in_threadpool(run_heavy_operation, refresh_beancount_connection)
-        except Exception:
-            logger.exception("Beancount connection refresh failed after writeback")
 
     return XactResponse(
         synchronized=result["synchronized"],
