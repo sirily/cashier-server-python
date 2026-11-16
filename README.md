@@ -133,7 +133,7 @@ uv run cashier-server
 uv run python main.py
 ```
 
-Use this entry point rather than a bare `uvicorn main:app` invocation so that the BQL connection is preloaded and configuration is checked before serving requests. On Windows, run the Linux container (for example under WSL2); the historical `.cmd` helpers do not provide the POSIX filesystem guarantees.
+Use this entry point rather than a bare `uvicorn main:app` invocation so that the BQL connection is preloaded and configuration is checked before serving requests. On Windows, run the Linux container (for example under WSL2).
 
 ## Notes on the Implementation
 
