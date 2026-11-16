@@ -82,6 +82,25 @@ The root book and manual file must exist before starting the container. The imag
 
 Do not configure a writable directory or client-controlled write path.
 
+## Security boundaries and limits
+
+- Run the server on Linux (the supplied container is supported). Safe reads require `O_NOFOLLOW`, descriptor-relative opens and `/proc/self/fd`; writeback additionally requires POSIX `flock`. Native Windows execution is not supported by the hardened filesystem protocol.
+- Use HTTPS at the reverse proxy or configure both TLS files. Do not expose plain HTTP port 3000 publicly. Keep proxy/body/connection limits enabled and restrict CORS to the PWA origin where possible.
+- The health exemption uses the ASGI path, never a URL reconstructed from `Host`. Malformed or duplicate Host headers are rejected; protected routes always require the bearer token.
+- BQL is a read-only channel: `SELECT`, `BALANCES`, `JOURNAL`, and `PRINT` over the initial Beancount tables. `CREATE`, `INSERT`, external data sources and mutable shared query tables are forbidden. Writing from the PWA still uses `/xact`, not BQL.
+- BQL workers have a 5-second execution deadline, 1 GiB address-space limit, 16 KiB query/512-node AST limits, and 10,000-row/8 MiB HTTP JSON response limits (the internal worker response is bounded separately). A timeout kills and reaps the worker. Expensive operations have four admission slots per server process; excess work receives `503` rather than waiting unboundedly. The built-in entry point also limits concurrent connections to 64.
+- Requests are capped at 1 MiB and query strings at 64 KiB; receiving the body has a 15-second deadline. `/xact` accepts at most 100 items, 64 KiB per transaction, 256 postings and 64 metadata fields. `cashier_id` is a case-sensitive ASCII key, at most 128 characters, beginning with a letter or digit and containing only letters, digits, `.`, `_`, `:`, or `-`. Existing noncanonical IDs must be corrected by the owner before writeback is enabled; IDs are never silently rewritten.
+- Legacy infrastructure reads return only nonhidden `.bean`/`.beancount` files. Secrets, backups and unrelated files belong outside the ledger directory. Glob responses remain raw source; a literal root request produces the standalone snapshot. Neither mechanism follows symlinks. Keep the configured root and every parent path free of symlinks.
+- The ledger is captured through bounded no-follow reads before loading. Limits are 16 MiB per file (including the manual file and recovery comments), 64 MiB per capture/expanded include graph, 4,096 files/include visits and 64 include levels. Absolute, escaping, encrypted and unsafe includes fail closed. Snapshot, BQL preload and writeback use private captured source copies outside the ledger tree.
+- A source-only capture supports relative include/glob files and configured server-installed plugins. `Document` directives, `option "documents"`, `insert_pythonpath`, encrypted roots and environment-expanded root names are not supported; they fail closed rather than silently losing auxiliaries or importing workspace Python. Trusted installed plugins are not sandboxed and can still access resources permitted to the server process. Do not enable untrusted plugins.
+- The existing manual file must be included exactly once in the configured full ledger. Each writer holds an exclusive lock on its pinned file descriptor through reread, validation and durable append. All other writers must honor the same lock; the read-only parent mount remains required. Only the mounted manual file is written.
+
+### Interrupted writeback recovery
+
+New batches carry reserved `; cashier-writeback-v1` checksum comments. Catchable append failures roll back only a verified prefix of that attempt to its original length, under the file lock. An interrupted or altered batch is detected on the next write; the server refuses further writes instead of acknowledging incomplete transactions. This is crash-conscious append, not a claim of crash atomicity.
+
+If recovery is required, stop every writer, preserve the damaged file for review outside the workspace, restore a verified known-good manual file, and validate the full ledger before restarting. Never remove an unverified suffix or checksum comments just to clear an error. Keep recovery comments intact in the manual source file. Snapshot/pull preserves transaction semantics and `cashier_id` metadata; presentation of surrounding comments is not a recovery mechanism.
+
 ## Architecture documents
 
 - [`docs/architecture/standalone-pwa-ledger-snapshot.md`](docs/architecture/standalone-pwa-ledger-snapshot.md) — design for producing one source-preserving standalone `main.bean` for offline Cashier PWA sync.
@@ -100,9 +119,7 @@ produces the final versioned image and GitHub Release.
 GitNexus, the project MCP configuration, and local index maintenance. These tools
 are development-only and are not installed in the production image.
 
-VSCode recommended.
-Run the `run.cmd` script to start the server.
-Or run from VSCode to debug.
+Use Zed or VSCode with the locked Python environment. Run the Linux entry point below, or use the supplied container.
 
 ### Debug
 
@@ -114,7 +131,7 @@ uv run cashier-server
 uv run python main.py
 ```
 
-On Windows, `run.cmd` runs the same entry point. Use this entry point rather than a bare `uvicorn main:app` invocation so that the BQL connection is preloaded and configuration is checked before serving requests.
+Use this entry point rather than a bare `uvicorn main:app` invocation so that the BQL connection is preloaded and configuration is checked before serving requests. On Windows, run the Linux container (for example under WSL2); the historical `.cmd` helpers do not provide the POSIX filesystem guarantees.
 
 ## Notes on the Implementation
 
