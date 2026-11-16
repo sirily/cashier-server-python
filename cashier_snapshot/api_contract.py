@@ -1,31 +1,20 @@
 """Declarative OpenAPI metadata; response documentation does not re-encode ledger data."""
 
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import Depends, FastAPI
 from fastapi.security import HTTPBearer
-from pydantic import BaseModel, Field, JsonValue, RootModel
+from pydantic import BaseModel, Field, JsonValue
 
 from cashier_snapshot.http_limits import (
     BODY_TIMEOUT_SECONDS,
     MAX_QUERY_STRING_BYTES,
     MAX_REQUEST_BYTES,
 )
-from cashier_snapshot.query import (
-    MAX_AST_DEPTH,
-    MAX_AST_NODES,
-    MAX_DATASET_BYTES,
-    MAX_QUERY_BYTES,
-    MAX_RESPONSE_BYTES,
-    MAX_ROWS,
-    MAX_WORKER_MEMORY_BYTES,
-    QUERY_TIMEOUT_SECONDS,
-)
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "2.0.0"
 SERVERS = [
-    {"url": "/", "description": "Direct server paths (internal HTTP)"},
-    {"url": "/api", "description": "External same-origin reverse proxy prefix"},
+    {"url": "/", "description": "Server-relative paths; external prefix and proxy limits are deployment configuration."},
 ]
 # Middleware remains authoritative; this non-rejecting dependency declares security only.
 BEARER_DEPENDENCIES = [Depends(HTTPBearer(auto_error=False, scheme_name="CashierBearer"))]
@@ -33,15 +22,7 @@ CASHIER_LIMITS = {
     "request_body_bytes": MAX_REQUEST_BYTES,
     "query_string_bytes": MAX_QUERY_STRING_BYTES,
     "body_receive_seconds": BODY_TIMEOUT_SECONDS,
-    "bql_query_bytes": MAX_QUERY_BYTES,
-    "bql_ast_nodes": MAX_AST_NODES,
-    "bql_ast_depth": MAX_AST_DEPTH,
-    "bql_deadline_seconds": QUERY_TIMEOUT_SECONDS,
-    "bql_cpu_seconds": 5,
-    "bql_worker_memory_bytes": MAX_WORKER_MEMORY_BYTES,
-    "bql_dataset_bytes": MAX_DATASET_BYTES,
-    "bql_rows": MAX_ROWS,
-    "bql_json_bytes": MAX_RESPONSE_BYTES,
+
     "heavy_operation_slots": 4,
     "uvicorn_concurrency": 64,
     "xact_batch_items": 100,
@@ -77,9 +58,6 @@ class ValidationErrorResponse(BaseModel):
     detail: list[ValidationIssue]
 
 
-class BqlValidationErrorResponse(BaseModel):
-    detail: str | list[ValidationIssue]
-
 
 class SnapshotBuildDetail(BaseModel):
     message: str
@@ -90,17 +68,6 @@ class SnapshotBuildErrorResponse(BaseModel):
     detail: SnapshotBuildDetail | list[ValidationIssue]
 
 
-class MissingQueryResponse(BaseModel):
-    error: Literal["No query provided"]
-
-
-class BqlRows(RootModel[list[list[JsonValue]]]):
-    root: list[list[JsonValue]] = Field(max_length=MAX_ROWS)
-
-
-class BqlResponse(RootModel[BqlRows | MissingQueryResponse]):
-    """Arbitrary JSON array rows, or the historical missing/empty-query envelope."""
-
 
 class SnapshotResponse(BaseModel):
     content: str = Field(description="Standalone source-preserving Beancount ledger text.")
@@ -109,7 +76,7 @@ class SnapshotResponse(BaseModel):
 class HealthResponse(BaseModel):
     ok: bool
     beancount_file_configured: bool
-    beancount_loaded: bool
+
 
 
 PUBLIC_ERRORS: dict[int | str, dict[str, Any]] = {
@@ -145,19 +112,7 @@ PIPELINE_ERROR: dict[str, Any] = {
     "model": ErrorResponse,
     "description": "Missing server configuration or a safe ledger pipeline/filesystem failure.",
 }
-BQL_RESPONSES: dict[int | str, dict[str, Any]] = {
-    **PROTECTED_ERRORS,
-    200: {"model": BqlResponse, "description": "JSON array rows; absent/empty query returns an error envelope."},
-    400: {
-        "model": ErrorResponse,
-        "description": "Invalid request, BQL syntax/source/AST, or BQL query/dataset/row/JSON size limit.",
-    },
-    422: {
-        "model": BqlValidationErrorResponse,
-        "description": "BQL execution/CPU deadline (string detail), or FastAPI request validation (detail array).",
-    },
-    500: PIPELINE_ERROR,
-}
+
 SNAPSHOT_RESPONSES: dict[int | str, dict[str, Any]] = {
     **PROTECTED_ERRORS,
     200: {"model": SnapshotResponse, "description": "Configured root snapshot, not arbitrary file access."},
@@ -176,44 +131,15 @@ XACT_RESPONSES: dict[int | str, dict[str, Any]] = {
     422: {"model": ValidationErrorResponse, "description": "Invalid JSON/request types or batch exceeds 100 items."},
     500: PIPELINE_ERROR,
 }
-RELOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
-    **PROTECTED_ERRORS,
-    200: {"description": "Reload completed; the response is JSON null.", "content": {"application/json": {"schema": {"type": "null"}}}},
-    422: {"model": ErrorResponse, "description": "Beancount ledger could not be loaded safely."},
-    500: PIPELINE_ERROR,
-}
 
-BQL_DESCRIPTION = """Execute read-only BQL against the preloaded server ledger.
-
-The optional `query` parameter remains backward compatible: absent or empty text
-returns HTTP 200 `{"error":"No query provided"}`. Results are arbitrary JSON array
-rows, not objects keyed by column names; existing Decimal-to-JSON-number encoding
-is preserved. At most 10,000 rows and 8 MiB JSON are returned.
-
-Every SELECT, including nested SELECTs, needs an explicit `accounts` or
-`transactions` source (`#accounts` / `#transactions` also work, as do subqueries
-whose SELECTs have allowed explicit sources). The sole exception is one whole
-top-level AST equivalent to `SELECT sum(number), currency, account ORDER BY account`:
-it implicitly reads postings grouped by currency/account and returns rows
-`[sum as JSON number, currency, account]`. No other implicit or explicit postings
-access is allowed; wrapping or extending that special query is not allowed.
-
-Current Sync forms include `SELECT account FROM #accounts WHERE close IS NULL ORDER BY account`
-and `SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee`.
-Mutations, external sources, other tables, PRINT/JOURNAL/BALANCES, expression-based
-sources and OPEN/CLOSE/CLEAR qualifiers are rejected. BQL is not a write channel.
-
-Limits: 16 KiB UTF-8 query, AST 512 nodes/depth 32, 5 s wall deadline and 5 s CPU,
-1 GiB worker memory, 64 MiB serialized dataset, four shared heavy-operation slots.
-All requests have a 1 MiB body, 64 KiB query string and 15 s receive deadline;
-Uvicorn admits at most 64 concurrent connections/tasks.
-"""
 SNAPSHOT_DESCRIPTION = """Build the standalone source-preserving root ledger for offline PWA parsing.
 
 `file_path` must be exactly the configured BEANCOUNT_FILE basename (for example
 `main.bean`), never a client-selected included file. Includes/globs are resolved
 server-side; unchanged source directives stay verbatim and Python plugin output
-is materialized only under the snapshot export policy. Exact `@@` total prices
+is materialized only under the snapshot export policy. Each request captures current
+source files, including newly matched glob files; no snapshot cache or stale-success
+fallback is used. Read or materialization failure is a request error. Exact `@@` total prices
 are preserved in storage and snapshot, never converted to rounded `@` unit prices.
 Build errors fail closed with `detail: {message, errors: [string]}`, never raw source.
 Capture limits: 16 MiB per file, 64 MiB captured/expanded sources, 4096 files/include
@@ -234,7 +160,7 @@ when an ID cannot be recovered. `synchronized` includes both new and existing ID
 The only target is configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE, normally
 /workspace/manual_transactions.bean, the sole rw file in a read-only workspace.
 No client target path or writable ledger directory is accepted. Under a file lock,
-the server rereads/deduplicates, builds a private candidate, validates it through
+the server captures current files, rereads/deduplicates, builds a private candidate, validates it through
 the configured full-root BEANCOUNT_FILE pipeline, then performs a crash-conscious
 single-file write. This is not an atomic rename or a promise of crash atomicity.
 Exact `@@` total prices survive storage and snapshot without rounded `@` conversion.

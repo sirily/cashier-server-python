@@ -1,0 +1,29 @@
+{
+  "accepted_breaking_changes": [
+    "contract: servers/prefix changed",
+    "x-cashier-limits/bql_ast_depth: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_ast_nodes: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_cpu_seconds: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_dataset_bytes: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_deadline_seconds: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_json_bytes: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_query_bytes: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_rows: limit added/removed; compatibility unproven",
+    "x-cashier-limits/bql_worker_memory_bytes: limit added/removed; compatibility unproven",
+    "GET /: path removed",
+    "GET /health/responses/200/application/json: required response property 'beancount_loaded' removed",
+    "GET /health/responses/200/application/json/properties/beancount_loaded: response property removed (including optional properties)",
+    "GET /health: effective servers/prefix changed",
+    "GET /infrastructure: effective servers/prefix changed",
+    "GET /ping: effective servers/prefix changed",
+    "GET /reload: path removed",
+    "POST /xact: effective servers/prefix changed"
+  ],
+  "baseline_sha256": {
+    "openapi-v1.json": "aeea62ab68febfd87a151900ab3a883cd641f7b05991c7ee95c52f46ed26b342",
+    "openapi-v2.json": "3f0cb2a52af20f34f096279189d01ad6ce5335b2e0bc465e2800277952df42a7"
+  },
+  "from_contract_version": "1.0.0",
+  "reason": "Intentionally remove server BQL GET / and GET /reload, delete their cache/worker, and remove obsolete health beancount_loaded. Server paths and proxy configuration are independent.",
+  "to_contract_version": "2.0.0"
+}

@@ -5,6 +5,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from beancount.core import data
+from beancount.loader import load_string
 from fastapi.testclient import TestClient
 
 import main
@@ -379,10 +381,11 @@ def test_full_ledger_validation_uses_immutable_capture(configured_env, monkeypat
     assert response.json()["synchronized"] == ["abc-123"]
 
     # Baseline, per-entry and final validation reuse one captured source tree.
-    # The endpoint's post-commit cache refresh may separately load the live root.
+
     workspace = Path(configured_env).parent
     staged = [p for p in validation_paths if not Path(p).is_relative_to(workspace)]
     assert len(staged) >= 3
+    assert staged == validation_paths
     assert len(set(staged)) == 1
     assert all(Path(p).name == "main.bean" for p in staged)
     assert all(p.startswith("/proc/self/fd/") for p in staged)
@@ -460,13 +463,12 @@ def test_write_permission_error_returns_json_500(configured_env, monkeypatch):
     assert Path(configured_env).read_text(encoding="utf-8") == ""
 
 
-def test_refresh_failure_after_write_still_returns_synchronized(configured_env, monkeypatch):
-    """A post-commit cache refresh failure must not make the client retry a committed write."""
-
-    def failing_refresh():
-        raise RuntimeError("reload failed")
-
-    monkeypatch.setattr(main, "refresh_beancount_connection", failing_refresh)
+def test_committed_write_is_visible_in_next_snapshot_without_cache(configured_env, monkeypatch):
+    """Each pull reads durable source, including writes after an earlier snapshot."""
+    monkeypatch.delattr(main.app.state, "connection", raising=False)
+    before = client.get("/infrastructure", params={"file_path": "main.bean"})
+    assert before.status_code == 200
+    assert "abc-123" not in before.json()["content"]
 
     text = (
         '2026-05-28 * "Coffee"\n'
@@ -478,6 +480,18 @@ def test_refresh_failure_after_write_still_returns_synchronized(configured_env, 
     assert response.status_code == 200
     assert response.json() == {"synchronized": ["abc-123"], "rejected": []}
     assert "abc-123" in Path(configured_env).read_text(encoding="utf-8")
+
+    after = client.get("/infrastructure", params={"file_path": "main.bean"})
+    assert after.status_code == 200
+    entries, errors, _ = load_string(after.json()["content"])
+    assert errors == []
+    matching = [
+        entry for entry in entries
+        if isinstance(entry, data.Transaction) and entry.meta.get("cashier_id") == "abc-123"
+    ]
+    assert len(matching) == 1
+    assert matching[0].narration == "Coffee"
+    assert not hasattr(main.app.state, "connection")
 
 
 def test_append_preserves_existing_manual_source_comments(configured_env):

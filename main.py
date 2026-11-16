@@ -21,11 +21,8 @@ from starlette.concurrency import run_in_threadpool
 
 from cashier_snapshot.api_contract import (
     BEARER_DEPENDENCIES,
-    BQL_DESCRIPTION,
-    BQL_RESPONSES,
     HEALTH_RESPONSES,
     PROTECTED_ERRORS,
-    RELOAD_RESPONSES,
     SERVERS,
     SNAPSHOT_DESCRIPTION,
     SNAPSHOT_RESPONSES,
@@ -103,112 +100,6 @@ async def require_api_token(request: Request, call_next):
 app.add_middleware(RequestLimitsMiddleware)
 
 
-@app.get(
-    "/",
-    summary="Execute a read-only BQL query",
-    description=BQL_DESCRIPTION,
-    dependencies=BEARER_DEPENDENCIES,
-    response_model=None,
-    responses=BQL_RESPONSES,
-)
-async def index(query: Annotated[str | None, Query(
-    description="Optional BQL text; the limit is 16 KiB UTF-8 bytes, not characters.",
-    openapi_examples={
-        "accounts": {"value": "SELECT account FROM #accounts WHERE close IS NULL ORDER BY account"},
-        "payees": {"value": "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee"},
-        "balances": {"value": "SELECT sum(number), currency, account ORDER BY account"},
-    },
-)] = None):
-    """Execute a BQL query against the configured Beancount book."""
-    if not query:
-        return {"error": "No query provided"}
-
-    return await beancount(query)
-
-
-def preload_beancount_data():
-    """
-    Pre-load beancount data into memory.
-    """
-    import beanquery
-    from beancount import loader
-
-    from cashier_snapshot.workspace import private_ledger_copy
-
-    if not BEAN_FILE:
-        raise ValueError("BEANCOUNT_FILE must be configured")
-
-    with private_ledger_copy(Path(BEAN_FILE)) as root:
-        entries, errors, options = loader.load_file(str(root))
-    if errors:
-        raise ValueError("Beancount ledger has validation errors")
-    connection = beanquery.connect("beancount:", entries=entries, errors=[], options=options)
-    # Query workers extract entries/options, never a DSN or mutable table registry.
-    return connection
-
-
-async def beancount(query: str | None = None):
-    """
-    Execute a beancount query and return the result.
-    Requires Beancount to be installed.
-
-    Args:
-        query: The beancount command to execute
-
-    Returns:
-        The result of the beancount command
-    """
-    import beancount
-
-    from cashier_snapshot.query import QueryRejected, QueryTimeout, execute_readonly
-
-    if not BEAN_FILE:
-        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE must be configured")
-    if not query:
-        return {"error": "No query provided"}
-
-    connection = app.state.connection
-    try:
-        result = await run_in_threadpool(run_heavy_operation, execute_readonly, connection, query)
-    except QueryTimeout as exc:
-        raise HTTPException(status_code=422, detail="BQL query exceeded execution limit") from exc
-    except QueryRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    # convert Inventory objects (sets) into lists that are JSON-serializable.
-    for i, row in enumerate(result):
-        # Convert the row to a list
-        row_list = list(row)
-        # Iterate over the tuple values
-        for j, value in enumerate(row_list):
-            if isinstance(value, beancount.Inventory):
-                # Turn the Inventory into a simple list
-                value = list(value)
-                row_list[j] = value
-        # Convert the list back to a tuple and set it back into the result
-        result[i] = tuple(row_list)
-
-    return result
-
-
-@app.get(
-    "/reload",
-    summary="Reload the preloaded Beancount ledger",
-    description="Reload the configured full ledger for subsequent BQL queries. Success returns JSON null.",
-    dependencies=BEARER_DEPENDENCIES,
-    response_model=None,
-    responses=RELOAD_RESPONSES,
-)
-def reload_beancount_data():
-    """
-    Reload the Beancount data.
-    """
-    if not BEAN_FILE:
-        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE must be configured")
-    try:
-        app.state.connection = run_heavy_operation(preload_beancount_data)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Beancount ledger could not be loaded safely") from exc
 
 @app.get(
     "/ping",
@@ -233,19 +124,16 @@ async def ping():
 @app.get(
     "/health",
     summary="Public lightweight health check",
-    description="No bearer token required. Reports startup state without querying or revalidating the ledger.",
+    description="No bearer token required. Reports whether BEANCOUNT_FILE is configured without reading or validating the ledger.",
     response_model=None,
     responses=HEALTH_RESPONSES,
     openapi_extra={"security": []},
 )
 async def health():
     """Return a small health payload suitable for container health checks."""
-    # This endpoint is intentionally lightweight: it reports whether startup
-    # loaded Beancount data, but does not execute a query on every health probe.
     return {
         "ok": True,
         "beancount_file_configured": bool(BEAN_FILE),
-        "beancount_loaded": hasattr(app.state, "connection"),
     }
 
 
@@ -335,11 +223,6 @@ async def infrastructure_file(file_path: Annotated[str, Query(
     return await run_in_threadpool(run_heavy_operation, read_infrastructure_file, file_path)
 
 
-def refresh_beancount_connection():
-    """Reload the in-memory Beancount connection so subsequent queries see new data."""
-    app.state.connection = preload_beancount_data()
-    logger.info("Beancount connection refreshed after writeback")
-
 
 class XactRequest(BaseModel):
     transactions: list[str] = Field(
@@ -357,19 +240,6 @@ class XactResponse(BaseModel):
     synchronized: list[str] = Field(description="Newly committed and already-equivalent cashier_ids.")
     rejected: list[XactRejected] = Field(description="Per-item rejections; mixed batches still return HTTP 200.")
 
-
-def commit_and_refresh(transactions: list[str]):
-    """Keep the admission slot until a successful write is visible to BQL."""
-    from writeback import validate_and_commit
-
-    result, wrote = validate_and_commit(transactions)
-    if wrote:
-        try:
-            refresh_beancount_connection()
-        except Exception:
-            # The transaction is already durable; never report it as uncommitted.
-            logger.exception("Beancount connection refresh failed after writeback")
-    return result
 
 
 @app.post(
@@ -397,8 +267,10 @@ async def write_xact(request: XactRequest):
             detail="BEANCOUNT_MANUAL_TRANSACTIONS_FILE is not configured",
         )
 
+    from writeback import validate_and_commit
+
     try:
-        result = await run_in_threadpool(run_heavy_operation, commit_and_refresh, request.transactions)
+        result, _wrote = await run_in_threadpool(run_heavy_operation, validate_and_commit, request.transactions)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     except ValueError as exc:
@@ -428,7 +300,6 @@ def main():
     if not BEAN_FILE:
         raise RuntimeError("BEANCOUNT_FILE must be configured")
 
-    app.state.connection = preload_beancount_data()
 
     config = uvicorn.Config(
         app, host="0.0.0.0", port=3000,

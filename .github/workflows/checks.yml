@@ -106,6 +106,10 @@ jobs:
         if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --locked basedpyright --warnings
 
+      - name: Check HTTP contract compatibility against baseline
+        if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run --locked python scripts/check_api_contract.py
+
       - name: Run Python tests
         if: ${{ always() && !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --locked pytest --timeout=180 -v

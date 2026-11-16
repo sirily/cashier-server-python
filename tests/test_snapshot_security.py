@@ -18,7 +18,6 @@ from cashier_snapshot.workspace import (
     LedgerWorkspace,
     LedgerWorkspaceError,
     glob_workspace_files,
-    private_ledger_copy,
     read_workspace_file,
 )
 
@@ -432,8 +431,8 @@ def test_beancount_suffix_supported_for_included_sources(ledger):
 def test_private_copy_override_is_read_by_full_loader_and_cleaned(ledger):
     original = (ledger.parent / "accounts.bean").read_bytes()
     replacement = b"2024-01-01 open Assets:Candidate USD\n"
-    with private_ledger_copy(
-        ledger, {Path("accounts.bean"): replacement}
+    with LedgerWorkspace.capture(ledger).private_copy(
+        {Path("accounts.bean"): replacement}
     ) as private_root:
         assert private_root != ledger
         assert not private_root.is_relative_to(ledger.parent)
@@ -452,7 +451,7 @@ def test_private_copy_override_is_read_by_full_loader_and_cleaned(ledger):
 def test_private_copy_cleanup_on_loader_exception(ledger):
     with (
         pytest.raises(RuntimeError, match="synthetic failure"),
-        private_ledger_copy(ledger) as private_root,
+        LedgerWorkspace.capture(ledger).private_copy() as private_root,
     ):
         raise RuntimeError("synthetic failure")
     assert not private_root.exists()
@@ -495,7 +494,7 @@ def test_auxiliary_dependent_sources_fail_closed(ledger, source):
     ledger.write_bytes(source)
     with (
         pytest.raises(LedgerWorkspaceError, match="source-only ledger copy"),
-        private_ledger_copy(ledger),
+        LedgerWorkspace.capture(ledger).private_copy(),
     ):
         pytest.fail("Auxiliary-dependent ledger was silently changed")
 
@@ -519,7 +518,7 @@ def test_private_copy_rejects_symlink_temp_storage(ledger, tmp_path, monkeypatch
     monkeypatch.setenv("TMPDIR", str(alias))
     with (
         pytest.raises(LedgerWorkspaceError, match="Symlink source include"),
-        private_ledger_copy(ledger),
+        LedgerWorkspace.capture(ledger).private_copy(),
     ):
         pytest.fail("Created temporary source files in the ledger")
     assert sorted(path.name for path in ledger.parent.iterdir()) == [
@@ -535,7 +534,7 @@ def test_private_copy_temp_parent_is_pinned_during_full_loading(
     temporary_root.mkdir()
     moved = tmp_path / "moved"
     monkeypatch.setenv("TMPDIR", str(temporary_root))
-    with private_ledger_copy(ledger) as private_root:
+    with LedgerWorkspace.capture(ledger).private_copy() as private_root:
         temporary_root.rename(moved)
         temporary_root.symlink_to(ledger.parent, target_is_directory=True)
         entries, errors, _ = loader.load_file(str(private_root))

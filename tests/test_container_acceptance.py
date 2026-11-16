@@ -140,7 +140,7 @@ class TestContainerAcceptance:
         assert status == 200
         assert body == '"pong"'
 
-    @pytest.mark.parametrize("path", ["/hello", "/shutdown"])
+    @pytest.mark.parametrize("path", ["/", "/?query=SELECT%201", "/reload", "/hello", "/shutdown"])
     def test_removed_endpoints_return_404(self, path):
         status, body = _get(path)
         assert status == 404
@@ -151,6 +151,7 @@ class TestContainerAcceptance:
         try:
             result = subprocess.run(
                 ["docker", "run", "--name", name, "--network", "none",
+                 "-v", f"{FIXTURE_DIR}:/workspace:ro",
                  "-e", "BEANCOUNT_FILE=", "-e", "CASHIER_API_TOKEN", IMAGE_TAG],
                 check=False, capture_output=True, text=True, timeout=30,
                 env={**os.environ, "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
@@ -165,17 +166,14 @@ class TestContainerAcceptance:
     def test_health_ok(self):
         status, body = _get("/health", authorization=None)
         assert status == 200
-        data = json.loads(body)
-        assert data["ok"] is True
-        assert data["beancount_file_configured"] is True
-        assert data["beancount_loaded"] is True
+        assert json.loads(body) == {"ok": True, "beancount_file_configured": True}
 
     @pytest.mark.parametrize("authorization", [None, "Bearer wrong-token", "Basic wrong-token", "Bearer "])
     @pytest.mark.parametrize("path,method,data", [
         ("/ping", "GET", None),
         ("/infrastructure?file_path=main.bean", "GET", None),
         ("/xact", "POST", b'{"transactions": []}'),
-        ("/reload", "GET", None),
+        ("/openapi.json", "GET", None),
     ])
     def test_invalid_auth_rejected(self, authorization, path, method, data):
         status, body = _get(path, authorization=authorization, method=method, data=data)
@@ -186,50 +184,19 @@ class TestContainerAcceptance:
     @pytest.mark.parametrize("host", ["testserver/health?", "testserver/health#"])
     @pytest.mark.parametrize("path,method,data", [
         ("/infrastructure?file_path=main.bean", "GET", None),
-        ("/?query=SELECT%201", "GET", None),
+        ("/ping", "GET", None),
         ("/xact", "POST", b'{"transactions": []}'),
     ])
     def test_malformed_host_never_bypasses_authentication(self, host, path, method, data):
         status, _ = _get(path, authorization=None, method=method, data=data, host=host)
         assert status == 400
 
-    @pytest.mark.parametrize("query", [
-        "CREATE TABLE accounts (account str)",
-        "INSERT INTO accounts (account) VALUES ('Assets:Fake')",
-        "CREATE TABLE external (line str) USING 'csv:/outside/synthetic.txt'",
-    ])
-    def test_bql_mutations_and_external_sources_rejected(self, query):
-        status, _ = _get("/", params={"query": query})
-        assert status == 400
-        status, body = _get("/", params={"query": "SELECT account FROM #accounts LIMIT 1"})
-        assert status == 200
-        assert len(json.loads(body)) == 1
-
-    def test_legacy_posting_totals_remain_available_without_opening_postings_api(self):
-        status, body = _get("/", params={
-            "query": "SELECT sum(number), currency, account ORDER BY account",
-        })
-        assert status == 200, body
-        rows = json.loads(body)
-        assert rows
-        assert all(len(row) == 3 and isinstance(row[0], (int, float)) for row in rows)
-        assert [row[2] for row in rows] == sorted(row[2] for row in rows)
-        status, _ = _get("/", params={"query": "SELECT * FROM #postings"})
-        assert status == 400
-
     def test_runtime_openapi_matches_versioned_contract(self):
         status, body = _get("/openapi.json")
         assert status == 200
-        contract = os.path.join(os.path.dirname(__file__), "..", "docs", "api", "openapi-v1.json")
+        contract = os.path.join(os.path.dirname(__file__), "..", "docs", "api", "openapi-v2.json")
         with open(contract, encoding="utf-8") as source:
             assert json.loads(body) == json.load(source)
-
-    def test_pwa_payees_query_remains_available(self):
-        status, body = _get("/", params={
-            "query": "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee LIMIT 10",
-        })
-        assert status == 200
-        assert json.loads(body)
 
     def test_infrastructure_rejects_hidden_nonledger_paths(self):
         status, _ = _get("/infrastructure", params={"file_path": ".env"})
@@ -299,12 +266,14 @@ class TestContainerAcceptance:
             deadline = time.monotonic() + 30
             while True:
                 try:
-                    assert request("/health")["beancount_loaded"] is True
+                    assert request("/health")["ok"] is True
                     break
                 except (urllib.error.URLError, ConnectionError, OSError):
                     if time.monotonic() > deadline:
                         raise
                     time.sleep(0.2)
+            initial_snapshot = request("/infrastructure?file_path=main.bean")["content"]
+            assert 'cashier_id: "container-writeback-security"' not in initial_snapshot
             expected = {"synchronized": ["container-writeback-security"], "rejected": []}
             assert request("/xact", {"transactions": [transaction, transaction]}) == expected
             committed = manual.read_bytes()
@@ -313,13 +282,24 @@ class TestContainerAcceptance:
             posting_pattern = rf"^\s+{re.escape(account)}\s+{re.escape(amount)}$"
             assert re.search(posting_pattern, committed.decode("utf-8"), re.MULTILINE)
             pulled = request("/infrastructure?file_path=main.bean")["content"]
-            assert 'cashier_id: "container-writeback-security"' in pulled
+            assert pulled != initial_snapshot
+            assert pulled.count('cashier_id: "container-writeback-security"') == 1
             assert '"Shop" "Lunch"' in pulled
             assert re.search(posting_pattern, pulled, re.MULTILINE)
             assert request("/xact", {"transactions": [transaction]}) == expected
             assert manual.read_bytes() == committed
             assert request("/infrastructure?file_path=main.bean")["content"] == pulled
-            assert request("/?query=" + quote("SELECT payee FROM transactions")) == [["Shop"]]
+            from beancount.core import data
+            from beancount.parser import parser
+
+            entries, errors, _ = parser.parse_string(pulled)
+            assert not errors, errors
+            transactions = [entry for entry in entries if isinstance(entry, data.Transaction)]
+            assert len(transactions) == 1
+            assert transactions[0].meta["cashier_id"] == "container-writeback-security"
+            assert transactions[0].payee == "Shop"
+            assert transactions[0].narration == "Lunch"
+            assert [posting.account for posting in transactions[0].postings] == [account, "Expenses:Food"]
             result = subprocess.run(
                 ["node", "--input-type=module", "-e", '''
 import assert from "node:assert/strict";
@@ -607,6 +587,8 @@ assert.equal(errors.length, 0, JSON.stringify(errors));
     def test_image_has_required_plugin_modules(self):
         """Verify all required plugin modules are importable inside the built image."""
         modules = [
+            "fava",
+            "fava.core.filters",
             "beancount_lazy_plugins.valuation",
             "beancount_lazy_plugins.generate_inverse_prices",
             "beancount_lazy_plugins.generate_base_ccy_prices",
@@ -627,6 +609,44 @@ assert.equal(errors.length, 0, JSON.stringify(errors));
             raise AssertionError(
                 f"Plugin import check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
             )
+
+    def test_image_filter_map_uses_fava_filters(self):
+        """Removing the query API must not break filter_map's runtime Fava dependency."""
+        script = textwrap.dedent(r'''
+            from beancount import loader
+            from beancount.core.data import Transaction
+
+            source = (
+                'plugin "beancount_lazy_plugins.filter_map"\n'
+                '2024-01-01 open Assets:Cash USD\n'
+                '2024-01-01 open Expenses:Food USD\n'
+                '2024-01-01 custom "filter-map" "apply"\n'
+                '  filter: "narration:\'Matched purchase\'"\n'
+                '  addTags: "filtered"\n'
+                '2024-01-02 * "Shop" "Matched purchase"\n'
+                '  Assets:Cash -1 USD\n'
+                '  Expenses:Food 1 USD\n'
+                '2024-01-03 * "Shop" "Other purchase"\n'
+                '  Assets:Cash -2 USD\n'
+                '  Expenses:Food 2 USD\n'
+            )
+            entries, errors, _ = loader.load_string(source)
+            assert not errors, errors
+            transactions = [entry for entry in entries if isinstance(entry, Transaction)]
+            assert len(transactions) == 2, transactions
+            assert transactions[0].narration == "Matched purchase"
+            assert transactions[0].tags == frozenset({"filtered"}), transactions[0]
+            assert transactions[1].narration == "Other purchase"
+            assert not transactions[1].tags, transactions[1]
+            ''')
+        result = subprocess.run(
+            ["docker", "run", "--rm", "--network", "none", IMAGE_TAG,
+             "/app/.venv/bin/python", "-c", script],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Fava filter_map runtime check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
 
     def test_materialized_content_reparses_with_rustledger(self):
         """Materialized snapshot must parse with 0 errors in @rustledger/wasm (PWA boundary)."""

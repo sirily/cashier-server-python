@@ -16,12 +16,9 @@ from jsonschema import Draft202012Validator
 import main
 import writeback
 from cashier_snapshot import http_limits, workspace
-from cashier_snapshot import query as readonly
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT = json.loads((ROOT / "docs/api/openapi-v1.json").read_text(encoding="utf-8"))
-BALANCES = "SELECT sum(number), currency, account ORDER BY account"
-PAYEES = "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee"
+CONTRACT = json.loads((ROOT / "docs/api/openapi-v2.json").read_text(encoding="utf-8"))
 
 
 def validate_value(value, schema):
@@ -51,7 +48,7 @@ def sync_api(monkeypatch, tmp_path):
     monkeypatch.setenv("BEANCOUNT_FILE", str(root))
     monkeypatch.setenv("BEANCOUNT_MANUAL_TRANSACTIONS_FILE", str(manual))
     monkeypatch.setattr(main, "CASHIER_API_TOKEN", "contract-test-token")
-    monkeypatch.setattr(main.app.state, "connection", main.preload_beancount_data(), raising=False)
+
     with TestClient(main.app, headers={"Authorization": "Bearer contract-test-token"}) as client:
         yield client, root, manual
 
@@ -61,9 +58,12 @@ def test_openapi_artifact_matches_implementation_and_has_valid_schemas():
     assert main.app.openapi() == CONTRACT
     OpenAPI.model_validate(CONTRACT)
     assert CONTRACT["openapi"].startswith("3.1.")
-    assert CONTRACT["x-contract-version"] == "1.0.0"
-    assert [server["url"] for server in CONTRACT["servers"]] == ["/", "/api"]
-    assert set(CONTRACT["paths"]) == {"/", "/infrastructure", "/xact", "/health", "/ping", "/reload"}
+    assert CONTRACT["x-contract-version"] == "2.0.0"
+    assert len(CONTRACT["servers"]) == 1
+    server = CONTRACT["servers"][0]
+    assert server["url"] == "/"
+    assert "deployment" in server["description"].lower()
+    assert set(CONTRACT["paths"]) == {"/infrastructure", "/xact", "/health", "/ping"}
     for schema in CONTRACT["components"]["schemas"].values():
         Draft202012Validator.check_schema(schema)
 
@@ -89,9 +89,6 @@ def test_contract_security_and_parameters():
     for path, methods in CONTRACT["paths"].items():
         for operation in methods.values():
             assert operation["security"] == ([] if path == "/health" else [{"CashierBearer": []}])
-    query = CONTRACT["paths"]["/"]["get"]["parameters"][0]
-    assert query["name"] == "query" and query["in"] == "query" and not query["required"]
-    assert query["examples"]["balances"]["value"] == BALANCES
     path = CONTRACT["paths"]["/infrastructure"]["get"]["parameters"][0]
     assert path["name"] == "file_path" and path["required"]
     body = CONTRACT["paths"]["/xact"]["post"]["requestBody"]
@@ -101,18 +98,11 @@ def test_contract_security_and_parameters():
 
 def test_contract_limits_are_bound_to_implementation():
     limits = CONTRACT["x-cashier-limits"]
+    assert not any(name.startswith("bql_") for name in limits)
     for name, actual in {
         "request_body_bytes": http_limits.MAX_REQUEST_BYTES,
         "query_string_bytes": http_limits.MAX_QUERY_STRING_BYTES,
         "body_receive_seconds": http_limits.BODY_TIMEOUT_SECONDS,
-        "bql_query_bytes": readonly.MAX_QUERY_BYTES,
-        "bql_ast_nodes": readonly.MAX_AST_NODES,
-        "bql_ast_depth": readonly.MAX_AST_DEPTH,
-        "bql_deadline_seconds": readonly.QUERY_TIMEOUT_SECONDS,
-        "bql_worker_memory_bytes": readonly.MAX_WORKER_MEMORY_BYTES,
-        "bql_dataset_bytes": readonly.MAX_DATASET_BYTES,
-        "bql_rows": readonly.MAX_ROWS,
-        "bql_json_bytes": readonly.MAX_RESPONSE_BYTES,
         "xact_batch_items": writeback.MAX_TRANSACTIONS,
         "xact_transaction_bytes": writeback.MAX_TRANSACTION_BYTES,
         "xact_postings": writeback.MAX_POSTINGS,
@@ -130,22 +120,24 @@ def test_contract_limits_are_bound_to_implementation():
         assert limits[name] == actual, name
 
 
-def test_bql_balances_and_payees_responses_follow_contract(sync_api):
+@pytest.mark.parametrize("path", ["/", "/?query=SELECT+1", "/reload"])
+def test_removed_operations_are_not_found_or_documented(sync_api, path):
     client, _, _ = sync_api
-    response = client.get("/", params={"query": BALANCES})
-    assert response.status_code == 200
-    rows = validate_response(response, "/")
-    assert sorted(rows, key=lambda row: (row[2], row[1])) == [
-        [43, "EUR", "Assets:Cash"], [85, "USD", "Assets:Cash"],
-        [-50, "EUR", "Equity:Opening"], [-100, "USD", "Equity:Opening"],
-        [7, "EUR", "Expenses:Food"], [15, "USD", "Expenses:Food"],
-    ]
-    assert [row[2] for row in rows] == sorted(row[2] for row in rows)
-    response = client.get("/", params={"query": PAYEES})
-    assert response.status_code == 200
-    assert validate_response(response, "/") == [["Cafe"], ["Employer"], ["Market"]]
-    assert validate_response(client.get("/"), "/") == {"error": "No query provided"}
-    assert validate_response(client.get("/", params={"query": ""}), "/") == {"error": "No query provided"}
+    response = client.get(path)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+    assert path.split("?")[0] not in CONTRACT["paths"]
+
+
+def test_removed_bql_and_cache_state_are_absent(sync_api):
+    client, _, _ = sync_api
+    assert client.get("/ping").status_code == 200
+    for name in (
+        "index", "beancount", "preload_beancount_data", "reload_beancount_data",
+        "refresh_beancount_connection", "commit_and_refresh",
+    ):
+        assert not hasattr(main, name)
+    assert not hasattr(main.app.state, "connection")
 
 
 def test_root_snapshot_and_health_responses_follow_contract(sync_api):
@@ -160,10 +152,10 @@ def test_root_snapshot_and_health_responses_follow_contract(sync_api):
     response = client.get("/health", headers={"Authorization": ""})
     assert response.status_code == 200
     assert validate_response(response, "/health") == {
-        "ok": True, "beancount_file_configured": True, "beancount_loaded": True,
+        "ok": True, "beancount_file_configured": True,
     }
     assert validate_response(client.get("/ping"), "/ping") == "pong"
-    assert validate_response(client.get("/reload"), "/reload") is None
+
 
 
 def test_writeback_total_price_partial_success_retry_and_conflict_follow_contract(sync_api):
@@ -216,26 +208,12 @@ def test_writeback_total_price_partial_success_retry_and_conflict_follow_contrac
     assert cash_units.number == Decimal("1.00")
 
 
-@pytest.mark.parametrize("query", [
-    "BALANCES", "JOURNAL", "PRINT", "SELECT number",
-    "SELECT * FROM #postings", "SELECT * FROM #entries", "SELECT * FROM #prices",
-    "SELECT * FROM (SELECT * FROM #postings)",
-    'CREATE TABLE external USING "csv:/etc/passwd"',
-    "INSERT INTO accounts VALUES ('Assets:Fake')",
-    "SELECT account FROM #accounts;\nSELECT 1 FROM #transactions",
-])
-def test_forbidden_bql_responses_follow_contract(sync_api, query):
-    client, _, _ = sync_api
-    response = client.get("/", params={"query": query})
-    assert response.status_code == 400
-    assert validate_response(response, "/")["detail"]
-
 
 @pytest.mark.parametrize("path,method,params,body", [
-    ("/", "get", {"query": BALANCES}, None),
+
     ("/infrastructure", "get", {"file_path": "main.bean"}, None),
     ("/xact", "post", None, {"transactions": []}),
-    ("/ping", "get", None, None), ("/reload", "get", None, None),
+    ("/ping", "get", None, None),
 ])
 def test_protected_operations_require_bearer_as_documented(sync_api, path, method, params, body):
     client, _, _ = sync_api
@@ -267,27 +245,25 @@ def test_schema_validation_and_build_errors_follow_contract(sync_api):
     assert validate_response(response, "/infrastructure")["detail"]["errors"]
 
 
-def test_timeout_admission_configuration_and_http_limits_follow_contract(sync_api, monkeypatch):
+def test_admission_configuration_and_http_limits_follow_contract(sync_api, monkeypatch):
     client, _, _ = sync_api
-    with monkeypatch.context() as patch:
-        def timeout(*args):
-            raise readonly.QueryTimeout("deadline")
-        patch.setattr(readonly, "execute_readonly", timeout)
-        response = client.get("/", params={"query": BALANCES})
-        assert response.status_code == 422
-        validate_response(response, "/")
     with monkeypatch.context() as patch:
         gate = threading.BoundedSemaphore(1)
         gate.acquire()
         patch.setattr(main, "_heavy_operations", gate)
-        response = client.get("/", params={"query": BALANCES})
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
         assert response.status_code == 503
-        validate_response(response, "/")
+        validate_response(response, "/infrastructure")
     with monkeypatch.context() as patch:
         patch.setattr(main, "BEAN_FILE", None)
-        response = client.get("/", params={"query": BALANCES})
+        response = client.get("/infrastructure", params={"file_path": "main.bean"})
         assert response.status_code == 500
-        validate_response(response, "/")
+        validate_response(response, "/infrastructure")
+        response = client.get("/health", headers={"Authorization": ""})
+        assert response.status_code == 200
+        assert validate_response(response, "/health") == {
+            "ok": True, "beancount_file_configured": False,
+        }
     with monkeypatch.context() as patch:
         patch.setattr(main, "CASHIER_API_TOKEN", "")
         response = client.get("/ping")
@@ -299,11 +275,15 @@ def test_timeout_admission_configuration_and_http_limits_follow_contract(sync_ap
     response = client.post("/xact", content=b"x" * (http_limits.MAX_REQUEST_BYTES + 1))
     assert response.status_code == 413
     validate_response(response, "/xact", "post")
+    monkeypatch.setattr(http_limits, "MAX_QUERY_STRING_BYTES", 64)
+    response = client.get("/infrastructure", params={"file_path": "x" * 65})
+    assert response.status_code == 413
+    validate_response(response, "/infrastructure")
 
 
 def test_response_validator_rejects_contract_drift():
     schema = CONTRACT["paths"]["/health"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
-    valid = {"ok": True, "beancount_file_configured": True, "beancount_loaded": True}
+    valid = {"ok": True, "beancount_file_configured": True}
     validate_value(valid, schema)
     invalid = {**valid, "ok": "yes"}
     assert not Draft202012Validator({**schema, "components": CONTRACT["components"]}).is_valid(invalid)

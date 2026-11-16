@@ -1,16 +1,8 @@
 # Set api_token to the configured CASHIER_API_TOKEN in your REST client.
 @server = http://localhost:3000
 
-### Accounts
-GET {{server}}/?query=SELECT%20account%20FROM%20%23accounts%20WHERE%20close%20IS%20NULL
-Authorization: Bearer {{api_token}}
-
-### Payees
-GET {{server}}/?query=SELECT%20DISTINCT%20COALESCE(payee,%20narration)%20AS%20payee%20FROM%20transactions%20ORDER%20BY%20payee
-Authorization: Bearer {{api_token}}
-
-### Reload
-GET {{server}}/reload
+### Standalone snapshot (use the configured BEANCOUNT_FILE basename)
+GET {{server}}/infrastructure?file_path=main.bean
 Authorization: Bearer {{api_token}}
 
 ### Ping
