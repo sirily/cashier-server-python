@@ -67,6 +67,97 @@ class TestInfrastructureRoot:
         assert 'Assets:Cash  10 USD' in result["content"]
         assert 'Equity:Opening-Balances' in result["content"]
 
+    @pytest.mark.parametrize("relative_bean_file", [False, True], ids=["absolute", "relative"])
+    def test_infrastructure_root_with_custom_name_and_nested_glob_includes(
+        self, tmp_path, monkeypatch, relative_bean_file
+    ):
+        ledger = tmp_path / "ledger"
+        ledger.mkdir()
+        (ledger / "nested").mkdir()
+        (ledger / "prices").mkdir()
+        root = ledger / "family-ledger.beancount"
+        root.write_text(
+            'option "operating_currency" "USD"\n'
+            'plugin "beancount.plugins.implicit_prices"\n'
+            'include "nested/support.beancount"\n'
+            'include "prices/*.bean"\n'
+            'include "manual_transactions.bean"\n',
+            encoding="utf-8",
+        )
+        (ledger / "nested" / "support.beancount").write_text(
+            'include "accounts.bean"\n'
+            '2024-01-01 commodity USD\n'
+            '2024-01-01 commodity EUR\n',
+            encoding="utf-8",
+        )
+        (ledger / "nested" / "accounts.bean").write_text(
+            '2024-01-01 open Assets:Cash USD\n'
+            '2024-01-01 open Equity:Opening-Balances USD\n',
+            encoding="utf-8",
+        )
+        (ledger / "prices" / "2024.bean").write_text(
+            '2024-01-02 price EUR 1.25 USD\n', encoding="utf-8"
+        )
+        (ledger / "manual_transactions.bean").write_text(
+            '2024-01-02 * "Included manual transaction"\n'
+            '  cashier_id: "root-only-regression"\n'
+            '  Assets:Cash 10 USD\n'
+            '  Equity:Opening-Balances -10 USD\n',
+            encoding="utf-8",
+        )
+        (ledger / "unrelated.bean").write_text(
+            '2024-01-01 commodity NOT_INCLUDED\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            main, "BEAN_FILE", str(root.relative_to(tmp_path)) if relative_bean_file else str(root)
+        )
+
+        response = client.get("/infrastructure", params={"file_path": root.name})
+
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert set(result) == {"content"}
+        content = result["content"]
+        assert 'include "' not in content
+        assert 'plugin "' not in content
+        assert "NOT_INCLUDED" not in content
+        entries, errors, _ = loader.load_string(content)
+        assert not errors
+        assert {entry.account for entry in entries if isinstance(entry, data.Open)} == {
+            "Assets:Cash", "Equity:Opening-Balances"
+        }
+        assert {entry.currency for entry in entries if isinstance(entry, data.Commodity)} == {
+            "USD", "EUR"
+        }
+        assert any(
+            isinstance(entry, data.Price)
+            and entry.currency == "EUR"
+            and entry.amount == amount.Amount(Decimal("1.25"), "USD")
+            for entry in entries
+        )
+        assert any(
+            isinstance(entry, data.Transaction)
+            and entry.narration == "Included manual transaction"
+            and entry.meta["cashier_id"] == "root-only-regression"
+            for entry in entries
+        )
+
+        monkeypatch.setattr(
+            main, "render_materialized_root_book",
+            lambda: pytest.fail("Rejected paths must not build a snapshot"),
+        )
+        for file_path in (
+            "nested/support.beancount", "nested/accounts.bean", "accounts.bean",
+            "prices/2024.bean", "manual_transactions.bean", "unrelated.bean",
+            "ledger/family-ledger.beancount", "main.bean",
+        ):
+            response = client.get("/infrastructure", params={"file_path": file_path})
+            assert response.status_code == 403, (file_path, response.text)
+            assert response.json() == {
+                "detail": "Only the configured root snapshot is available"
+            }
+
     def test_infrastructure_root_materialization_reports_loader_errors(self):
         """Invalid root materialization returns a controlled error instead of raw source."""
         test_bean_file = os.path.join(TEST_DIR, "book.bean")
@@ -654,122 +745,75 @@ class TestInfrastructureRoot:
         assert not _is_empty_cost_spec(non_empty)
 
 
-class TestInfrastructure:
+class TestInfrastructureRootOnly:
+    """Only the configured root basename exposes a materialized snapshot."""
 
+    @pytest.mark.parametrize("file_path", [
+        "config.bean", "accounts.bean", "commodities.bean", "manual_transactions.bean",
+        "prices/2023.bean", "missing.bean", "credentials.txt",
+        "prices/*.bean", "prices/*", "prices/*.nonexistent",
+        "*", "*.bean", "book.*", "book.bea?", "[b]ook.bean", "book.bean[",
+    ])
+    def test_non_root_paths_and_globs_are_forbidden_without_building_snapshot(
+        self, monkeypatch, file_path
+    ):
+        monkeypatch.setattr(
+            main, "render_materialized_root_book",
+            lambda: pytest.fail("Rejected paths must not build a snapshot"),
+        )
 
-    def test_infrastructure_config_returns_config_file(self):
-        """Test that infrastructure endpoint returns the config.bean file content."""
-        response = client.get("/infrastructure", params={"file_path": "config.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert "content" in result
-        
-        # Read expected content from tests/config.bean
-        config_path = os.path.join(TEST_DIR, "config.bean")
-        with open(config_path, "r", encoding="utf-8") as f:
-            expected_content = f.read()
-        
-        assert result["content"] == expected_content
+        response = client.get("/infrastructure", params={"file_path": file_path})
 
-    def test_infrastructure_config_returns_required_files(self):
-        """Test that infrastructure endpoint returns the required config.bean file."""
-        response = client.get("/infrastructure", params={"file_path": "config.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert "content" in result
-        assert isinstance(result["content"], str)
-        assert len(result["content"]) > 0
-
-
-class TestInfrastructureAccounts:
-    """Tests for /infrastructure endpoint with accounts.bean"""
-
-    def test_infrastructure_accounts_returns_accounts_file(self):
-        """Test that infrastructure endpoint returns the accounts.bean file content."""
-        response = client.get("/infrastructure", params={"file_path": "accounts.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert "content" in result
-        
-        # Read expected content from tests/accounts.bean
-        accounts_path = os.path.join(TEST_DIR, "accounts.bean")
-        with open(accounts_path, "r", encoding="utf-8") as f:
-            expected_content = f.read()
-        
-        assert result["content"] == expected_content
-
-    def test_infrastructure_accounts_returns_required_files(self):
-        """Test that infrastructure endpoint returns the required accounts.bean file."""
-        response = client.get("/infrastructure", params={"file_path": "accounts.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert "content" in result
-        assert isinstance(result["content"], str)
-
-
-class TestInfrastructureCommodities:
-    """Tests for /infrastructure endpoint with commodities.bean"""
-
-    def test_infrastructure_commodities_returns_commodities_file(self):
-        """Test that infrastructure endpoint returns the commodities.bean file content."""
-        response = client.get("/infrastructure", params={"file_path": "commodities.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert "content" in result
-        
-        # Read expected content from tests/commodities.bean
-        commodities_path = os.path.join(TEST_DIR, "commodities.bean")
-        with open(commodities_path, "r", encoding="utf-8") as f:
-            expected_content = f.read()
-        
-        assert result["content"] == expected_content
-
-    def test_infrastructure_commodities_returns_required_files(self):
-        """Test that infrastructure endpoint returns the required commodities.bean file."""
-        response = client.get("/infrastructure", params={"file_path": "commodities.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert "content" in result
-        assert isinstance(result["content"], str)
-
-
-class TestInfrastructureGlob:
-    """Tests for /infrastructure endpoint with glob patterns"""
-
-    def test_glob_prices_bean_returns_all_files_sorted(self):
-        """Test glob pattern prices/*.bean returns matching files in stable order."""
-        response = client.get("/infrastructure", params={"file_path": "prices/*.bean"})
-        assert response.status_code == 200
-        result = response.json()
-        assert result == {
-            "files": [
-                {"path": "prices/2023.bean", "content": "2023 content"},
-                {"path": "prices/2024.bean", "content": "2024 content"},
-            ]
-        }
-
-    def test_glob_only_returns_regular_files(self):
-        """Test glob pattern ignores matching directories."""
-        response = client.get("/infrastructure", params={"file_path": "prices/*"})
-        assert response.status_code == 200
-        result = response.json()
-        assert [item["path"] for item in result["files"]] == [
-            "prices/2023.bean",
-            "prices/2024.bean",
-        ]
-
-    def test_glob_no_match_returns_404(self):
-        """Test glob with no matches returns 404."""
-        response = client.get("/infrastructure", params={"file_path": "prices/*.nonexistent"})
-        assert response.status_code == 404
-        assert "File not found" in response.json()["detail"]
-
-    def test_glob_rejects_absolute_path(self):
-        """Test glob rejects absolute paths."""
-        response = client.get("/infrastructure", params={"file_path": "/etc/*.conf"})
         assert response.status_code == 403
+        assert response.json() == {"detail": "Only the configured root snapshot is available"}
 
-    def test_glob_rejects_parent_traversal(self):
-        """Test glob rejects parent traversal with double-dot."""
-        response = client.get("/infrastructure", params={"file_path": "../config.bean"})
-        assert response.status_code == 403
+    @pytest.mark.parametrize("configured", [True, False], ids=["configured", "unconfigured"])
+    @pytest.mark.parametrize(("file_path", "status_code"), [
+        ("", 404), (".", 404),
+        ("/etc/passwd", 403), ("/etc/*.conf", 403),
+        (".env", 403), ("hidden/.secret.bean", 403),
+        ("../config.bean", 403), ("../*.bean", 403), ("nested/../book.bean", 403),
+        ("book.bean\x00", 400), ("book.bean\n", 400), ("prices/*.bean\x00", 400),
+        ("a" * 1025, 400),
+    ])
+    def test_unsafe_paths_keep_validation_status_without_building_snapshot(
+        self, monkeypatch, configured, file_path, status_code
+    ):
+        if not configured:
+            monkeypatch.setattr(main, "BEAN_FILE", None)
+        monkeypatch.setattr(
+            main, "render_materialized_root_book",
+            lambda: pytest.fail("Rejected paths must not build a snapshot"),
+        )
+
+        response = client.get("/infrastructure", params={"file_path": file_path})
+
+        assert response.status_code == status_code
+        assert set(response.json()) == {"detail"}
+
+    def test_file_path_is_required(self, monkeypatch):
+        monkeypatch.setattr(
+            main, "render_materialized_root_book",
+            lambda: pytest.fail("A missing file_path must not build a snapshot"),
+        )
+
+        response = client.get("/infrastructure")
+
+        assert response.status_code == 422
+        assert any(
+            error["loc"] == ["query", "file_path"]
+            for error in response.json()["detail"]
+        )
+
+    @pytest.mark.parametrize("file_path", ["book.bean", "accounts.bean", "*.bean"])
+    def test_unconfigured_ledger_returns_500_without_building_snapshot(self, monkeypatch, file_path):
+        monkeypatch.setattr(main, "BEAN_FILE", None)
+        monkeypatch.setattr(
+            main, "render_materialized_root_book",
+            lambda: pytest.fail("An unconfigured ledger must not build a snapshot"),
+        )
+
+        response = client.get("/infrastructure", params={"file_path": file_path})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "BEANCOUNT_FILE environment variable not set"}

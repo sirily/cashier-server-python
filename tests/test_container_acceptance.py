@@ -385,16 +385,28 @@ assert.equal(errors.length, 0, JSON.stringify(errors));
         assert '"Subscription for SomeService paid in a year-instalment (split 1/12)"' in content
         assert "#splitted" in content
 
-    def test_infrastructure_includes_supporting_files(self):
-        status, body = _get("/infrastructure", params={"file_path": "accounts.bean"})
-        assert status == 200
-        data = json.loads(body)
-        assert "Expenses:EatingOut" in data["content"]
+    def test_infrastructure_exposes_supporting_entries_only_in_root_snapshot(self):
+        for file_path in (
+            "accounts.bean", "commodities.bean", "manual_transactions.bean",
+            "prices/*.bean", "*", "*.bean", "main.*", "main.bea?", "[m]ain.bean",
+        ):
+            status, body = _get("/infrastructure", params={"file_path": file_path})
+            assert status == 403, (file_path, body)
+            assert json.loads(body) == {
+                "detail": "Only the configured root snapshot is available"
+            }
 
-        status, body = _get("/infrastructure", params={"file_path": "commodities.bean"})
-        assert status == 200
+        status, body = _get("/infrastructure", params={"file_path": "main.bean"})
+        assert status == 200, body
         data = json.loads(body)
-        assert "AUTO_BROKER_USD" in data["content"]
+        assert set(data) == {"content"}
+        content = data["content"]
+        assert "1970-01-01 open Expenses:EatingOut" in content
+        assert "1970-01-01 commodity AUTO_BROKER_USD" in content
+        assert '"Salary from MyEmployer"' in content
+        assert "2024-01-02 price GBP 1.27 USD" in content
+        assert 'include "' not in content
+        assert 'plugin "' not in content
 
     def test_materialized_content_reparses(self):
         """The materialized snapshot must be valid Python-Beancount text."""

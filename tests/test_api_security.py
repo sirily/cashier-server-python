@@ -94,7 +94,7 @@ def test_infrastructure_hides_nonledger_and_hidden_files(api, name):
     assert response.status_code == 403
     assert "SYNTHETIC_SECRET" not in response.text
     glob = api.get("/infrastructure", params={"file_path": "**/*"})
-    assert glob.status_code == 200
+    assert glob.status_code == 403
     assert "SYNTHETIC_SECRET" not in glob.text
 
 

@@ -192,12 +192,6 @@ async def health():
     }
 
 
-def get_ledger_root() -> Path:
-    if not BEAN_FILE:
-        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
-
-    return Path(os.path.abspath(BEAN_FILE)).parent
-
 
 def reject_unsafe_infrastructure_path(file_path: str) -> Path:
     if len(file_path) > 1024:
@@ -215,23 +209,6 @@ def reject_unsafe_infrastructure_path(file_path: str) -> Path:
 
     return requested_path
 
-
-def resolve_infrastructure_path(file_path: str) -> Path:
-    """Resolve an infrastructure path under the Beancount file directory.
-
-    Cashier PWA asks for files such as config.bean/accounts.bean relative to the
-    Beancount book. Do not allow absolute paths or ../ traversal outside the
-    ledger directory.
-    """
-    requested_path = reject_unsafe_infrastructure_path(file_path)
-    ledger_root = get_ledger_root()
-    return ledger_root / requested_path
-
-
-def is_root_infrastructure_path(full_file_path: Path) -> bool:
-    if not BEAN_FILE:
-        return False
-    return full_file_path == Path(os.path.abspath(BEAN_FILE))
 
 
 def render_materialized_root_book() -> str:
@@ -276,70 +253,14 @@ def render_materialized_root_book() -> str:
     return content
 
 
-def is_glob_path(file_path: str) -> bool:
-    return any(char in file_path for char in "*?[")
-
-
-def infrastructure_read_error(exc: ValueError) -> HTTPException:
-    message = str(exc)
-    status = 413 if "budget exceeded" in message else 403
-    return HTTPException(status_code=status, detail=message)
-
-
-def read_infrastructure_glob(file_path: str):
-    """Read bounded nonhidden Beancount files without following symlinks."""
-    from cashier_snapshot.workspace import LedgerWorkspaceError, glob_workspace_files
-
-    requested_path = reject_unsafe_infrastructure_path(file_path)
-    ledger_root = get_ledger_root()
-    try:
-        files = glob_workspace_files(ledger_root, requested_path.as_posix())
-    except LedgerWorkspaceError as exc:
-        raise infrastructure_read_error(exc) from exc
-    if not files:
-        raise HTTPException(status_code=404, detail="File not found: no matching Beancount files")
-    try:
-        return {
-            "files": [
-                {
-                    "path": path.as_posix(),
-                    "content": content.decode("utf-8"),
-                }
-                for path, content in files.items()
-            ]
-        }
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=422, detail="Source file is not UTF-8") from exc
-
-
 def read_infrastructure_file(file_path: str):
-    """
-    Provides a Beancount infrastructure file.
-    For use with RustLedger.
-    
-    Args:
-        file_path: The file path relative to the Beancount directory (e.g., "config.bean", "accounts.bean", "commodities.bean")
-    
-    Returns:
-        The content of the requested file
-    """
-    if is_glob_path(file_path):
-        return read_infrastructure_glob(file_path)
-
-    from cashier_snapshot.workspace import LedgerWorkspaceError, read_workspace_file
-
-    full_file_path = resolve_infrastructure_path(file_path)
-    if is_root_infrastructure_path(full_file_path):
-        return {"content": render_materialized_root_book()}
-    try:
-        content = read_workspace_file(get_ledger_root(), Path(file_path)).decode("utf-8")
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Beancount file not found") from exc
-    except LedgerWorkspaceError as exc:
-        raise infrastructure_read_error(exc) from exc
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=422, detail="Source file is not UTF-8") from exc
-    return {"content": content}
+    """Return only the configured root snapshot, never client-selected source."""
+    requested_path = reject_unsafe_infrastructure_path(file_path)
+    if not BEAN_FILE:
+        raise HTTPException(status_code=500, detail="BEANCOUNT_FILE environment variable not set")
+    if any(char in file_path for char in "*?[") or requested_path != Path(Path(BEAN_FILE).name):
+        raise HTTPException(status_code=403, detail="Only the configured root snapshot is available")
+    return {"content": render_materialized_root_book()}
 
 
 @app.get("/infrastructure")

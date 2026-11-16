@@ -39,8 +39,9 @@ def test_price_notation_survives_writeback_pull_and_retry(fx_ledger, postings, a
 
     raw = client.get("/infrastructure", params={"file_path": "manual_transactions.bean"})
     snapshot = client.get("/infrastructure", params={"file_path": "main.bean"})
-    assert raw.status_code == snapshot.status_code == 200
-    assert raw.json()["content"].encode() == committed
+    assert raw.status_code == 403
+    assert snapshot.status_code == 200
+    assert raw.json() == {"detail": "Only the configured root snapshot is available"}
     for content in (committed.decode(), snapshot.json()["content"]):
         assert content.count('cashier_id: "exact-price"') == 1
         assert "__cashier" not in content
