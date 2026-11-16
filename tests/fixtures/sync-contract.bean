@@ -1,0 +1,22 @@
+2024-01-01 open Assets:Cash USD, EUR
+2024-01-01 open Assets:Foreign GBP
+2024-01-01 open Equity:Opening USD, EUR
+2024-01-01 open Expenses:Food USD, EUR
+
+2024-01-02 * "Employer" "Opening balances"
+  Assets:Cash      100.00 USD
+  Equity:Opening -100.00 USD
+  Assets:Cash       50.00 EUR
+  Equity:Opening  -50.00 EUR
+
+2024-01-03 * "Cafe" "Lunch"
+  Assets:Cash     -12.50 USD
+  Expenses:Food    12.50 USD
+
+2024-01-04 * "Market"
+  Assets:Cash      -7.00 EUR
+  Expenses:Food     7.00 EUR
+
+2024-01-05 * "Cafe" "Coffee"
+  Assets:Cash      -2.50 USD
+  Expenses:Food     2.50 USD

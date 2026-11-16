@@ -9,15 +9,30 @@ import re
 import sys
 import threading
 from pathlib import Path
+from typing import Annotated
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from cashier_snapshot.api_contract import (
+    BEARER_DEPENDENCIES,
+    BQL_DESCRIPTION,
+    BQL_RESPONSES,
+    HEALTH_RESPONSES,
+    PROTECTED_ERRORS,
+    RELOAD_RESPONSES,
+    SERVERS,
+    SNAPSHOT_DESCRIPTION,
+    SNAPSHOT_RESPONSES,
+    XACT_DESCRIPTION,
+    XACT_RESPONSES,
+    install_openapi_contract,
+)
 from cashier_snapshot.http_limits import RequestLimitsMiddleware
 
 _heavy_operations = threading.BoundedSemaphore(4)
@@ -44,7 +59,9 @@ app = FastAPI(
     title="Cashier Server",
     description="Beancount synchronization server for Cashier PWA",
     version="0.14.0",
+    servers=SERVERS,
 )
+install_openapi_contract(app)
 
 
 @app.middleware("http")
@@ -86,8 +103,22 @@ async def require_api_token(request: Request, call_next):
 app.add_middleware(RequestLimitsMiddleware)
 
 
-@app.get("/")
-async def index(query: str | None = None):
+@app.get(
+    "/",
+    summary="Execute a read-only BQL query",
+    description=BQL_DESCRIPTION,
+    dependencies=BEARER_DEPENDENCIES,
+    response_model=None,
+    responses=BQL_RESPONSES,
+)
+async def index(query: Annotated[str | None, Query(
+    description="Optional BQL text; the limit is 16 KiB UTF-8 bytes, not characters.",
+    openapi_examples={
+        "accounts": {"value": "SELECT account FROM #accounts WHERE close IS NULL ORDER BY account"},
+        "payees": {"value": "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee"},
+        "balances": {"value": "SELECT sum(number), currency, account ORDER BY account"},
+    },
+)] = None):
     """Execute a BQL query against the configured Beancount book."""
     if not query:
         return {"error": "No query provided"}
@@ -160,7 +191,14 @@ async def beancount(query: str | None = None):
     return result
 
 
-@app.get("/reload")
+@app.get(
+    "/reload",
+    summary="Reload the preloaded Beancount ledger",
+    description="Reload the configured full ledger for subsequent BQL queries. Success returns JSON null.",
+    dependencies=BEARER_DEPENDENCIES,
+    response_model=None,
+    responses=RELOAD_RESPONSES,
+)
 def reload_beancount_data():
     """
     Reload the Beancount data.
@@ -172,7 +210,19 @@ def reload_beancount_data():
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Beancount ledger could not be loaded safely") from exc
 
-@app.get("/ping")
+@app.get(
+    "/ping",
+    summary="Authenticated liveness check",
+    description="Requires the deployment bearer token; returns the JSON string \"pong\".",
+    dependencies=BEARER_DEPENDENCIES,
+    response_model=None,
+    responses={
+        **PROTECTED_ERRORS,
+        200: {"description": "JSON string pong.", "content": {"application/json": {
+            "schema": {"type": "string", "const": "pong"}, "example": "pong",
+        }}},
+    },
+)
 async def ping():
     """
     Simple ping endpoint to check if the server is running.
@@ -180,7 +230,14 @@ async def ping():
     return "pong"
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    summary="Public lightweight health check",
+    description="No bearer token required. Reports startup state without querying or revalidating the ledger.",
+    response_model=None,
+    responses=HEALTH_RESPONSES,
+    openapi_extra={"security": []},
+)
 async def health():
     """Return a small health payload suitable for container health checks."""
     # This endpoint is intentionally lightweight: it reports whether startup
@@ -263,8 +320,18 @@ def read_infrastructure_file(file_path: str):
     return {"content": render_materialized_root_book()}
 
 
-@app.get("/infrastructure")
-async def infrastructure_file(file_path: str):
+@app.get(
+    "/infrastructure",
+    summary="Export the configured root ledger snapshot",
+    description=SNAPSHOT_DESCRIPTION,
+    dependencies=BEARER_DEPENDENCIES,
+    response_model=None,
+    responses=SNAPSHOT_RESPONSES,
+)
+async def infrastructure_file(file_path: Annotated[str, Query(
+    description="Required configured BEANCOUNT_FILE basename only; no arbitrary file access.",
+    examples=["main.bean"],
+)]):
     return await run_in_threadpool(run_heavy_operation, read_infrastructure_file, file_path)
 
 
@@ -275,17 +342,20 @@ def refresh_beancount_connection():
 
 
 class XactRequest(BaseModel):
-    transactions: list[str] = Field(max_length=100)
+    transactions: list[str] = Field(
+        max_length=100,
+        description="Up to 100 completed * Beancount transaction strings, each with stable cashier_id metadata.",
+    )
 
 
 class XactRejected(BaseModel):
-    cashier_id: str | None = None
-    reason: str
+    cashier_id: str | None = Field(description="Null when no valid ID could be recovered.")
+    reason: str = Field(description="Concrete per-item validation or conflict reason.")
 
 
 class XactResponse(BaseModel):
-    synchronized: list[str]
-    rejected: list[XactRejected]
+    synchronized: list[str] = Field(description="Newly committed and already-equivalent cashier_ids.")
+    rejected: list[XactRejected] = Field(description="Per-item rejections; mixed batches still return HTTP 200.")
 
 
 def commit_and_refresh(transactions: list[str]):
@@ -302,7 +372,14 @@ def commit_and_refresh(transactions: list[str]):
     return result
 
 
-@app.post("/xact")
+@app.post(
+    "/xact",
+    summary="Synchronize Cashier manual transactions",
+    description=XACT_DESCRIPTION,
+    dependencies=BEARER_DEPENDENCIES,
+    response_model=XactResponse,
+    responses=XACT_RESPONSES,
+)
 async def write_xact(request: XactRequest):
     """
     Accept Cashier-created manual transaction directives and append them to

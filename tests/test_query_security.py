@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
@@ -21,6 +22,8 @@ from beancount import loader
 from beanquery.parser import ast
 
 from cashier_snapshot import query as readonly
+
+LEGACY_BALANCES_QUERY = "SELECT sum(number), currency, account ORDER BY account"
 
 
 @pytest.fixture
@@ -59,6 +62,128 @@ def test_readonly_queries_match_native_results(connection, query, bare):
     if bare:
         query = query.replace("#accounts", "accounts").replace("#transactions", "transactions")
     assert readonly.execute_readonly(connection, query) == expected
+
+
+@pytest.mark.parametrize("query", [
+    LEGACY_BALANCES_QUERY,
+    "select SUM(number), currency, account order by account asc",
+    "\n SELECT\t sum ( number ) , currency , account\n ORDER BY account ASC \n",
+    "SELECT /* balances */ sum(number), currency, account ORDER BY account",
+    "SELECT sum(number), currency, account ORDER /* sort */ BY account ASC; BQL comment",
+])
+def test_legacy_balances_query_matches_native_postings(connection, query):
+    statement = beanquery.parser.parse(query)
+    assert statement.from_clause is None
+    expected_statement = dataclasses.replace(
+        beanquery.parser.parse(query), from_clause=ast.Table("postings")
+    )
+
+    readonly._validate_ast(statement)
+
+    assert statement == expected_statement
+    assert type(statement.from_clause) is ast.Table
+    assert statement.from_clause.name == "postings"
+    expected = connection.execute(LEGACY_BALANCES_QUERY).fetchall()
+    assert expected == [
+        (Decimal(5), "USD", "Assets:Cash"),
+        (Decimal(-5), "USD", "Equity:Opening"),
+    ]
+    assert readonly.execute_readonly(connection, query) == expected
+
+
+@pytest.mark.parametrize("query", [
+    "SELECT number, currency, account ORDER BY account",
+    "SELECT sum(units), currency, account ORDER BY account",
+    "SELECT count(number), currency, account ORDER BY account",
+    "SELECT abs(sum(number)), currency, account ORDER BY account",
+    "SELECT sum(number, number), currency, account ORDER BY account",
+    "SELECT sum(number), account, currency ORDER BY account",
+    "SELECT sum(number), currency ORDER BY account",
+    "SELECT sum(number), currency, account, payee ORDER BY account",
+    "SELECT sum(number) AS total, currency, account ORDER BY account",
+    "SELECT sum(number), currency AS code, account ORDER BY account",
+    "SELECT sum(number), currency, account AS name ORDER BY account",
+    "SELECT sum(number), currency, account",
+    "SELECT sum(number), currency, account ORDER BY currency",
+    "SELECT sum(number), currency, account ORDER BY account DESC",
+    "SELECT sum(number), currency, account ORDER BY account, currency",
+    "SELECT sum(number), currency, account ORDER BY 3",
+    "SELECT sum(number), currency, account WHERE TRUE ORDER BY account",
+    "SELECT sum(number), currency, account GROUP BY currency, account ORDER BY account",
+    "SELECT sum(number), currency, account ORDER BY account PIVOT BY currency, account",
+    "SELECT sum(number), currency, account ORDER BY account LIMIT 0",
+    "SELECT sum(number), currency, account ORDER BY account LIMIT 1",
+    "SELECT DISTINCT sum(number), currency, account ORDER BY account",
+    "SELECT sum(number), currency, account FROM postings ORDER BY account",
+    "SELECT sum(number), currency, account FROM #postings ORDER BY account",
+    "SELECT sum(number), currency, account FROM # ORDER BY account",
+    "SELECT sum(number), currency, account FROM TRUE ORDER BY account",
+])
+def test_legacy_balances_exception_rejects_altered_queries(connection, query):
+    statement = beanquery.parser.parse(query)
+    original_from = statement.from_clause
+    with pytest.raises(readonly.QueryRejected):
+        readonly._validate_ast(statement)
+    assert statement.from_clause is original_from
+    with pytest.raises(readonly.QueryRejected):
+        readonly.execute_readonly(connection, query)
+
+
+@pytest.mark.parametrize("template", [
+    "SELECT * FROM ({query})",
+    "SELECT * FROM (SELECT * FROM ({query}))",
+    "SELECT 1 FROM #transactions WHERE 1 IN ({query})",
+    "SELECT account FROM accounts WHERE account IN ({query})",
+])
+def test_legacy_balances_exception_is_top_level_only(connection, template):
+    query = template.format(query=LEGACY_BALANCES_QUERY)
+    statement = beanquery.parser.parse(query)
+    original_from = statement.from_clause
+    with pytest.raises(readonly.QueryRejected):
+        readonly._validate_ast(statement)
+    assert statement.from_clause is original_from
+    with pytest.raises(readonly.QueryRejected):
+        readonly.execute_readonly(connection, query)
+
+
+@pytest.mark.parametrize(("resource_name", "limit", "accepted", "reason"), [
+    ("MAX_AST_NODES", 10, True, "AST node limit"),
+    ("MAX_AST_NODES", 9, False, "AST node limit"),
+    ("MAX_AST_DEPTH", 4, True, "AST depth limit"),
+    ("MAX_AST_DEPTH", 3, False, "AST depth limit"),
+])
+def test_legacy_source_rewrite_follows_full_resource_validation(
+    monkeypatch, resource_name, limit, accepted, reason,
+):
+    # The original semantic AST has ten nodes and a maximum depth of four.
+    statement = beanquery.parser.parse(LEGACY_BALANCES_QUERY)
+    monkeypatch.setattr(readonly, resource_name, limit)
+    if accepted:
+        readonly._validate_ast(statement)
+        assert type(statement.from_clause) is ast.Table
+        assert statement.from_clause.name == "postings"
+    else:
+        with pytest.raises(readonly.QueryRejected, match=reason):
+            readonly._validate_ast(statement)
+        assert statement.from_clause is None
+
+
+@pytest.mark.parametrize("location", ["sum_operand", "order_by"])
+@pytest.mark.parametrize("node", [
+    ast.Insert(ast.Table("postings"), None, [ast.Constant(1)]),
+    dataclasses.make_dataclass("FutureNode", [], bases=(ast.Node,))(),
+])
+def test_legacy_source_is_not_rewritten_before_ast_allowlist_validation(location, node):
+    statement = beanquery.parser.parse(LEGACY_BALANCES_QUERY)
+    if location == "sum_operand":
+        statement.targets[0].expression.operands[0] = node
+    else:
+        statement.order_by[0].column = node
+
+    with pytest.raises(readonly.QueryRejected, match="forbidden AST node"):
+        readonly._validate_ast(statement)
+
+    assert statement.from_clause is None
 
 
 def test_date_values_survive_worker_transfer(connection):
@@ -266,13 +391,21 @@ def test_uses_only_trusted_dataset_not_parent_registry(connection):
     trusted = SimpleNamespace(
         _cashier_entries=entries_table.entries,
         _cashier_options=entries_table.options,
-        tables={name: object() for name in (None, "entries", "accounts", "transactions", "leak")},
+        tables={name: object() for name in (None, "entries", "accounts", "transactions", "postings", "leak")},
         filename="/does/not/exist.bean",
     )
     assert readonly.execute_readonly(trusted, "SELECT account FROM #accounts") == [
         ("Assets:Cash",), ("Equity:Opening",),
     ]
     assert readonly.execute_readonly(trusted, "SELECT payee FROM #transactions") == [("Shop",)]
+    assert readonly.execute_readonly(trusted, LEGACY_BALANCES_QUERY) == [
+        (Decimal(5), "USD", "Assets:Cash"),
+        (Decimal(-5), "USD", "Equity:Opening"),
+    ]
+    with pytest.raises(readonly.QueryRejected):
+        readonly.execute_readonly(
+            trusted, "SELECT sum(number), currency, account FROM #postings ORDER BY account"
+        )
     with pytest.raises(readonly.QueryRejected):
         readonly.execute_readonly(trusted, "SELECT * FROM #leak")
 
@@ -281,10 +414,15 @@ def test_native_fallback_ignores_shadowed_tables(connection):
     connection.tables[None] = object()
     connection.tables["accounts"] = object()
     connection.tables["transactions"] = object()
+    connection.tables["postings"] = object()
     assert readonly.execute_readonly(connection, "SELECT account FROM #accounts") == [
         ("Assets:Cash",), ("Equity:Opening",),
     ]
     assert readonly.execute_readonly(connection, "SELECT payee FROM #transactions") == [("Shop",)]
+    assert readonly.execute_readonly(connection, LEGACY_BALANCES_QUERY) == [
+        (Decimal(5), "USD", "Assets:Cash"),
+        (Decimal(-5), "USD", "Equity:Opening"),
+    ]
 
 
 @pytest.mark.parametrize("connection", [
@@ -546,13 +684,21 @@ def test_timeout_includes_blocked_input_pipe(connection, monkeypatch):
     assert workers[0].returncode == -signal.SIGKILL
 
 
-@pytest.mark.parametrize(("source", "row_count"), [("accounts", 2), ("transactions", 1)])
-@pytest.mark.parametrize("prefix", ["", "#"])
-def test_worker_applies_os_limits_and_treats_query_as_json(connection, monkeypatch, source, row_count, prefix):
+@pytest.mark.parametrize(("query", "source", "expected"), [
+    (f"SELECT 'cos system pickle data' FROM {prefix}{source}", source,
+     [("cos system pickle data",)] * row_count)
+    for source, row_count in [("accounts", 2), ("transactions", 1)]
+    for prefix in ("", "#")
+] + [
+    (LEGACY_BALANCES_QUERY, "postings", [
+        (Decimal(5), "USD", "Assets:Cash"),
+        (Decimal(-5), "USD", "Equity:Opening"),
+    ]),
+])
+def test_worker_applies_os_limits_and_treats_query_as_json(connection, monkeypatch, query, source, expected):
     table = connection.tables["entries"]
 
     # A string resembling pickle opcodes is still only a BQL string literal.
-    query = f"SELECT 'cos system pickle data' FROM {prefix}{source}"
     request = json.dumps(query).encode() + b"\n" + pickle.dumps((table.entries, table.options))
     worker_tables = []
     original_execute = beanquery.Connection.execute
@@ -570,8 +716,9 @@ def test_worker_applies_os_limits_and_treats_query_as_json(connection, monkeypat
     output = io.BytesIO()
     monkeypatch.setattr(sys, "stdout", SimpleNamespace(buffer=output))
     readonly._worker()
-    assert pickle.loads(output.getvalue()) == (True, [("cos system pickle data",)] * row_count)
-    assert worker_tables == [{"accounts", "transactions"}]
+    assert pickle.loads(output.getvalue()) == (True, expected)
+    assert worker_tables == [{"accounts", "transactions", "postings"}]
+    assert all(None not in tables for tables in worker_tables)
     assert (resource.RLIMIT_AS, (1024 * 1024 * 1024,) * 2) in limits
     assert (resource.RLIMIT_CPU, (5, 5)) in limits
     assert (resource.RLIMIT_CORE, (0, 0)) in limits

@@ -205,6 +205,25 @@ class TestContainerAcceptance:
         assert status == 200
         assert len(json.loads(body)) == 1
 
+    def test_legacy_posting_totals_remain_available_without_opening_postings_api(self):
+        status, body = _get("/", params={
+            "query": "SELECT sum(number), currency, account ORDER BY account",
+        })
+        assert status == 200, body
+        rows = json.loads(body)
+        assert rows
+        assert all(len(row) == 3 and isinstance(row[0], (int, float)) for row in rows)
+        assert [row[2] for row in rows] == sorted(row[2] for row in rows)
+        status, _ = _get("/", params={"query": "SELECT * FROM #postings"})
+        assert status == 400
+
+    def test_runtime_openapi_matches_versioned_contract(self):
+        status, body = _get("/openapi.json")
+        assert status == 200
+        contract = os.path.join(os.path.dirname(__file__), "..", "docs", "api", "openapi-v1.json")
+        with open(contract, encoding="utf-8") as source:
+            assert json.loads(body) == json.load(source)
+
     def test_pwa_payees_query_remains_available(self):
         status, body = _get("/", params={
             "query": "SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee LIMIT 10",
@@ -564,9 +583,9 @@ assert.equal(errors.length, 0, JSON.stringify(errors));
                 "ruff", "basedpyright", "basedpyright-langserver", "node", "npm",
             ):
                 assert shutil.which(command) is None, f"Unexpected executable: {command}"
-            for module in ("pip", "uv", "pytest", "pytest_asyncio", "pytest_timeout", "ruff", "basedpyright"):
+            for module in ("pip", "uv", "pytest", "pytest_asyncio", "pytest_timeout", "ruff", "basedpyright", "jsonschema"):
                 assert importlib.util.find_spec(module) is None, f"Unexpected module: {module}"
-            for name in ("pip", "uv", "pytest", "pytest-asyncio", "pytest-timeout", "ruff", "basedpyright"):
+            for name in ("pip", "uv", "pytest", "pytest-asyncio", "pytest-timeout", "ruff", "basedpyright", "jsonschema"):
                 try:
                     importlib.metadata.distribution(name)
                 except importlib.metadata.PackageNotFoundError:

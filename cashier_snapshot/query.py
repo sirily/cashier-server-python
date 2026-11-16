@@ -3,8 +3,9 @@
 ``execute_readonly(connection, query)`` accepts a native preloaded Beanquery
 connection, or one with ``_cashier_entries`` and ``_cashier_options`` attributes.
 Only entries/options are transferred: never the connection, tables, a DSN, or a
-ledger filename. Each request gets fresh accounts/transactions tables for Sync.
-Only SELECT with an explicit source from those tables is supported.
+ledger filename. Each request gets fresh Beancount tables for Sync.
+SELECT requires an explicit accounts/transactions source, except for the legacy
+posting-totals query, which is bound to postings after bounded AST validation.
 
 Parsing (including parser resource exhaustion), compilation (which can evaluate
 constant regexes), execution, and result encoding happen in an exec'd Python
@@ -48,6 +49,8 @@ QUERY_TIMEOUT_SECONDS = 5.0
 # Explicitly review new sources on dependency upgrades rather than trusting the
 # mutable connection.tables registry, including tables shadowing these names.
 _READONLY_TABLES = frozenset({"accounts", "transactions"})
+_POSTING_TOTALS_QUERY = "SELECT sum(number), currency, account ORDER BY account"
+_WORKER_TABLES = _READONLY_TABLES | {"postings"}
 _READONLY_NODES = frozenset({
     "Select", "Target", "Asterisk", "From",
     "GroupBy", "OrderBy", "PivotBy", "Table", "Column", "Function", "Attribute",
@@ -98,7 +101,7 @@ def _check_query(query: str) -> None:
 
 
 def _validate_ast(statement) -> None:
-    from beanquery.parser import ast
+    from beanquery.parser import ast, parse
 
     if type(statement) is not ast.Select:
         raise QueryRejected("Only SELECT queries are allowed")
@@ -134,9 +137,15 @@ def _validate_ast(statement) -> None:
         elif not isinstance(node, (str, int, bool, type(None), date, Decimal)):
             raise QueryRejected("Query contains an unsupported AST value")
 
+    # Preserve only the original Sync totals shape, not general implicit
+    # postings access. Dataclass equality ignores parser source locations.
+    posting_totals = statement == parse(_POSTING_TOTALS_QUERY)
     source_rewrites = []
     for select in selects:
         source = select.from_clause
+        if select is statement and posting_totals:
+            source_rewrites.append((select, "postings"))
+            continue
         if type(source) in {ast.Table, ast.Select}:
             continue
         if type(source) is ast.From and type(source.expression) is ast.Column:
@@ -312,7 +321,7 @@ def _worker() -> None:
         entries, options = pickle.loads(dataset)
         connection = beanquery.connect("beancount:", entries=entries, errors=[], options=options)
         for name in list(connection.tables):
-            if name not in _READONLY_TABLES:
+            if name not in _WORKER_TABLES:
                 del connection.tables[name]
         rows = connection.execute(statement).fetchall()
         if len(rows) > MAX_ROWS:

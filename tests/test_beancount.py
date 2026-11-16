@@ -2,9 +2,10 @@
 
 from pathlib import Path
 
+import beanquery
 import pytest
 from beancount.core import data
-from beancount.loader import load_string
+from beancount.loader import load_file, load_string
 from fastapi.testclient import TestClient
 
 import main
@@ -27,6 +28,17 @@ def beancount_client(monkeypatch, tmp_path):
     return TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
 
 
+@pytest.fixture
+def sync_contract_client(monkeypatch, tmp_path):
+    book = tmp_path / "main.bean"
+    fixture = Path(__file__).parent / "fixtures" / "sync-contract.bean"
+    book.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(main, "BEAN_FILE", str(book))
+    monkeypatch.setattr(main, "CASHIER_API_TOKEN", "test-api-token")
+    monkeypatch.setattr(main.app.state, "connection", main.preload_beancount_data(), raising=False)
+    return TestClient(main.app, headers={"Authorization": "Bearer test-api-token"})
+
+
 @pytest.mark.asyncio
 async def test_beancount_method(beancount_client):
     assert await main.beancount("SELECT 1 FROM #accounts LIMIT 1") == [(1,)]
@@ -40,6 +52,72 @@ async def test_beancount_method(beancount_client):
 ])
 def test_accounts_and_payees_queries(beancount_client, query, expected):
     response = beancount_client.get("/", params={"query": query})
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_legacy_balances_http_matches_native_single_currency(beancount_client):
+    query = "SELECT sum(number), currency, account ORDER BY account"
+    assert main.BEAN_FILE is not None
+    entries, errors, options = load_file(main.BEAN_FILE)
+    assert errors == []
+    native = beanquery.connect("beancount:", entries=entries, errors=[], options=options)
+    native_rows = native.execute(query).fetchall()
+
+    response = beancount_client.get("/", params={"query": query})
+
+    assert response.status_code == 200
+    assert response.json() == [
+        [-5.0, "USD", "Assets:Cash"],
+        [5.0, "USD", "Expenses:Food"],
+    ]
+    assert response.json() == [list(row) for row in native_rows]
+
+
+def test_legacy_balances_http_matches_native_multicurrency(sync_contract_client):
+    query = "SELECT sum(number), currency, account ORDER BY account"
+    assert main.BEAN_FILE is not None
+    entries, errors, options = load_file(main.BEAN_FILE)
+    assert errors == []
+    native = beanquery.connect("beancount:", entries=entries, errors=[], options=options)
+    native_rows = native.execute(query).fetchall()
+
+    response = sync_contract_client.get("/", params={"query": query})
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 6
+    assert [row[2] for row in rows] == [
+        "Assets:Cash", "Assets:Cash",
+        "Equity:Opening", "Equity:Opening",
+        "Expenses:Food", "Expenses:Food",
+    ]
+    expected = [
+        [43.0, "EUR", "Assets:Cash"],
+        [85.0, "USD", "Assets:Cash"],
+        [-50.0, "EUR", "Equity:Opening"],
+        [-100.0, "USD", "Equity:Opening"],
+        [7.0, "EUR", "Expenses:Food"],
+        [15.0, "USD", "Expenses:Food"],
+    ]
+    # ORDER BY account does not promise a currency order within each account.
+    assert sorted(rows, key=lambda row: (row[2], row[1])) == expected
+    assert sorted(
+        [list(row) for row in native_rows], key=lambda row: (row[2], row[1])
+    ) == expected
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("SELECT account FROM #accounts WHERE close IS NULL ORDER BY account", [
+        ["Assets:Cash"], ["Assets:Foreign"], ["Equity:Opening"], ["Expenses:Food"],
+    ]),
+    ("SELECT DISTINCT COALESCE(payee, narration) AS payee FROM transactions ORDER BY payee", [
+        ["Cafe"], ["Employer"], ["Market"],
+    ]),
+])
+def test_sync_contract_accounts_and_payees_queries(sync_contract_client, query, expected):
+    response = sync_contract_client.get("/", params={"query": query})
 
     assert response.status_code == 200
     assert response.json() == expected
