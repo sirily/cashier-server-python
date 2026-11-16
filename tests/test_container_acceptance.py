@@ -12,6 +12,7 @@ import re
 import secrets
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -512,6 +513,77 @@ assert.equal(errors.length, 0, JSON.stringify(errors));
             assert len(pads) == 0, "Pad entries leaked into materialized snapshot"
         finally:
             os.unlink(tmp_path)
+
+    def test_image_installs_application_noneditable_in_venv(self):
+        script = textwrap.dedent("""\
+            import importlib
+            import importlib.metadata
+            import json
+            import os
+            from pathlib import Path
+            import sys
+
+            assert os.getuid() != 0, "Runtime user must not be root"
+            prefix = Path(sys.prefix).resolve()
+            assert prefix == Path("/app/.venv"), prefix
+            for name in ("main", "writeback", "cashier_snapshot"):
+                module = importlib.import_module(name)
+                location = Path(module.__file__).resolve()
+                assert location.is_relative_to(prefix), (name, location)
+                assert "site-packages" in location.parts, (name, location)
+            distribution = importlib.metadata.distribution("cashier-server")
+            assert Path(distribution.locate_file("")).resolve().is_relative_to(prefix)
+            direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+            assert not direct_url.get("dir_info", {}).get("editable"), direct_url
+            for name in (
+                "main.py", "writeback.py", "cashier_snapshot", "pyproject.toml",
+                "uv.lock", "README.md", ".git", "build", "dist", ".cache",
+            ):
+                path = Path("/app") / name
+                assert not path.exists(), f"Build/source artifact retained: {path}"
+            """)
+        result = subprocess.run(
+            ["docker", "exec", CONTAINER_NAME, "/app/.venv/bin/python", "-c", script],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Non-editable installation check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    @pytest.mark.parametrize("python", ["/app/.venv/bin/python", "/usr/local/bin/python"])
+    def test_image_excludes_build_and_development_tools(self, python):
+        # Root can inspect /root/.cache; the application itself is checked as its runtime user above.
+        script = textwrap.dedent("""\
+            import importlib.metadata
+            import importlib.util
+            from pathlib import Path
+            import shutil
+
+            for command in (
+                "uv", "uvx", "git", "pip", "pip3", "pytest", "py.test",
+                "ruff", "basedpyright", "basedpyright-langserver", "node", "npm",
+            ):
+                assert shutil.which(command) is None, f"Unexpected executable: {command}"
+            for module in ("pip", "uv", "pytest", "pytest_asyncio", "pytest_timeout", "ruff", "basedpyright"):
+                assert importlib.util.find_spec(module) is None, f"Unexpected module: {module}"
+            for name in ("pip", "uv", "pytest", "pytest-asyncio", "pytest-timeout", "ruff", "basedpyright"):
+                try:
+                    importlib.metadata.distribution(name)
+                except importlib.metadata.PackageNotFoundError:
+                    pass
+                else:
+                    raise AssertionError(f"Unexpected distribution: {name}")
+            for path in ("/root/.cache/uv", "/app/.cache/uv"):
+                assert not Path(path).exists(), f"Build cache retained: {path}"
+            """)
+        result = subprocess.run(
+            ["docker", "exec", "--user", "0", CONTAINER_NAME, python, "-c", script],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Runtime tool isolation check failed ({python}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
 
     def test_image_has_required_plugin_modules(self):
         """Verify all required plugin modules are importable inside the built image."""

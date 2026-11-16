@@ -71,6 +71,8 @@ environment:
 
 The root book and manual file must exist before starting the container. The image runs as a non-root user, which needs read access to the book and write access to the single manual file. Do not configure `CASHIER_ENABLE_SHUTDOWN` or install Ledger CLI.
 
+The Dockerfile installs locked production dependencies in a separate builder stage with Git and uv. The final stage copies only the non-editable application environment at `/app/.venv`; Git, uv, pip, build caches, and development tools are not included. Runtime starts `cashier-server` directly, without installing or resolving dependencies. Curl remains available for the container health check.
+
 Do not configure a writable directory or client-controlled write path.
 
 Writeback preserves exact total prices (`@@ 1.00 USD`) in the manual file and the standalone snapshot, without deriving them from rounded unit prices. Explicit unit prices (`@`) remain unit prices. Retries retain the same `cashier_id` without appending another copy; changing the total, currency, or price notation under an existing ID is a conflict. Previously stored `@` entries are not automatically converted back to `@@`: the original total cannot be recovered reliably from a rounded unit price and must be reviewed by the owner.

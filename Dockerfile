@@ -1,26 +1,39 @@
-FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends curl ca-certificates git \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM base AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
     && python -m pip install --no-cache-dir --upgrade pip==26.3 uv==0.13.8 \
     && python -m pip uninstall --yes pip
 
 COPY pyproject.toml uv.lock README.md main.py writeback.py ./
 COPY cashier_snapshot ./cashier_snapshot
-RUN uv sync --locked --no-dev --no-cache \
+RUN uv sync --locked --no-dev --no-cache --no-editable
+
+FROM base AS runtime
+
+RUN python -m pip uninstall --yes pip \
     && groupadd --system app \
-    && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
-    && chown -R app:app /app
+    && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app
+
+COPY --from=builder /app/.venv /app/.venv
 
 ENV BEANCOUNT_FILE=/workspace/main.bean
 
