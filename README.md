@@ -39,7 +39,7 @@ The server runs on 0.0.0.0:3000, matching the Rust implementation.
 
 ## API Endpoints
 
-- `/?query=SELECT...` - Execute a Beancount BQL query, including Accounts and Payees queries
+- `/?query=SELECT...` - Execute a read-only BQL `SELECT` from `accounts` or `transactions` for Sync Accounts and Payees
 - `/ping` - Simple authenticated liveness check
 - `/health` - Unauthenticated container health/status check
 - `/reload` - Reload the Beancount data
@@ -89,7 +89,7 @@ Writeback preserves exact total prices (`@@ 1.00 USD`) in the manual file and th
 - Run the server on Linux (the supplied container is supported). Safe reads require `O_NOFOLLOW`, descriptor-relative opens and `/proc/self/fd`; writeback additionally requires POSIX `flock`. Native Windows execution is not supported by the hardened filesystem protocol.
 - Use HTTPS at the reverse proxy or configure both TLS files. Do not expose plain HTTP port 3000 publicly. Keep proxy/body/connection limits enabled and restrict CORS to the PWA origin where possible.
 - The health exemption uses the ASGI path, never a URL reconstructed from `Host`. Malformed or duplicate Host headers are rejected; protected routes always require the bearer token.
-- BQL is a read-only channel: `SELECT`, `BALANCES`, `JOURNAL`, and `PRINT` over the initial Beancount tables. `CREATE`, `INSERT`, external data sources and mutable shared query tables are forbidden. Writing from the PWA still uses `/xact`, not BQL.
+- BQL is a narrow read-only Sync channel, not a general query interface. Only `SELECT` with an explicit `FROM accounts` or `FROM transactions` is supported (`#accounts` and `#transactions` are also accepted). Every nested `SELECT` requires an explicit allowed source. `BALANCES`, `JOURNAL`, `PRINT`, other tables, implicit postings, expression-based `FROM`, and `OPEN`/`CLOSE`/`CLEAR` qualifiers are rejected with HTTP 400. Existing Accounts and Payees queries remain supported; clients using the removed forms must switch to the supported Sync queries. `CREATE`, `INSERT`, external data sources and mutable shared query tables remain forbidden. Writing from the PWA still uses `/xact`, not BQL.
 - BQL workers have a 5-second execution deadline, 1 GiB address-space limit, 16 KiB query/512-node AST limits, and 10,000-row/8 MiB HTTP JSON response limits (the internal worker response is bounded separately). A timeout kills and reaps the worker. Expensive operations have four admission slots per server process; excess work receives `503` rather than waiting unboundedly. The built-in entry point also limits concurrent connections to 64.
 - Requests are capped at 1 MiB and query strings at 64 KiB; receiving the body has a 15-second deadline. `/xact` accepts at most 100 items, 64 KiB per transaction, 256 postings and 64 metadata fields. `cashier_id` is a case-sensitive ASCII key, at most 128 characters, beginning with a letter or digit and containing only letters, digits, `.`, `_`, `:`, or `-`. Existing noncanonical IDs must be corrected by the owner before writeback is enabled; IDs are never silently rewritten.
 - Legacy infrastructure reads return only nonhidden `.bean`/`.beancount` files. Secrets, backups and unrelated files belong outside the ledger directory. Glob responses remain raw source; a literal root request produces the standalone snapshot. Neither mechanism follows symlinks. Keep the configured root and every parent path free of symlinks.

@@ -3,7 +3,8 @@
 ``execute_readonly(connection, query)`` accepts a native preloaded Beanquery
 connection, or one with ``_cashier_entries`` and ``_cashier_options`` attributes.
 Only entries/options are transferred: never the connection, tables, a DSN, or a
-ledger filename. Each request gets fresh initial Beancount tables.
+ledger filename. Each request gets fresh accounts/transactions tables for Sync.
+Only SELECT with an explicit source from those tables is supported.
 
 Parsing (including parser resource exhaustion), compilation (which can evaluate
 constant regexes), execution, and result encoding happen in an exec'd Python
@@ -46,12 +47,9 @@ QUERY_TIMEOUT_SECONDS = 5.0
 
 # Explicitly review new sources on dependency upgrades rather than trusting the
 # mutable connection.tables registry, including tables shadowing these names.
-_READONLY_TABLES = frozenset({
-    "", "accounts", "balances", "commodities", "documents", "entries",
-    "events", "notes", "postings", "prices", "transactions",
-})
+_READONLY_TABLES = frozenset({"accounts", "transactions"})
 _READONLY_NODES = frozenset({
-    "Select", "Balances", "Journal", "Print", "Target", "Asterisk", "From",
+    "Select", "Target", "Asterisk", "From",
     "GroupBy", "OrderBy", "PivotBy", "Table", "Column", "Function", "Attribute",
     "Subscript", "Constant", "Between", "Not", "IsNull", "IsNotNull", "And",
     "Or", "Equal", "NotEqual", "Greater", "GreaterEq", "Less", "LessEq",
@@ -102,11 +100,12 @@ def _check_query(query: str) -> None:
 def _validate_ast(statement) -> None:
     from beanquery.parser import ast
 
-    if type(statement) not in {ast.Select, ast.Balances, ast.Journal, ast.Print}:
-        raise QueryRejected("Only SELECT, BALANCES, JOURNAL, and PRINT are allowed")
+    if type(statement) is not ast.Select:
+        raise QueryRejected("Only SELECT queries are allowed")
     allowed = {getattr(ast, name) for name in _READONLY_NODES}
     pending = [(statement, 1)]
     count = 0
+    selects = []
     while pending:
         node, depth = pending.pop()
         if isinstance(node, ast.Node):
@@ -119,8 +118,10 @@ def _validate_ast(statement) -> None:
             # hidden in subqueries, function operands, or FROM expressions.
             if type(node) not in allowed:
                 raise QueryRejected("Query contains a forbidden AST node")
-            if isinstance(node, ast.Table) and getattr(node, "name", None) not in _READONLY_TABLES:
-                raise QueryRejected("Query may only use initial Beancount tables")
+            if type(node) is ast.Table and getattr(node, "name", None) not in _READONLY_TABLES:
+                raise QueryRejected("Query may only use accounts and transactions tables")
+            if type(node) is ast.Select:
+                selects.append(node)
             if not dataclasses.is_dataclass(node):
                 raise QueryRejected("Query contains an unsupported AST node")
             pending.extend(
@@ -132,6 +133,26 @@ def _validate_ast(statement) -> None:
             pending.extend((child, depth) for child in node)
         elif not isinstance(node, (str, int, bool, type(None), date, Decimal)):
             raise QueryRejected("Query contains an unsupported AST value")
+
+    source_rewrites = []
+    for select in selects:
+        source = select.from_clause
+        if type(source) in {ast.Table, ast.Select}:
+            continue
+        if type(source) is ast.From and type(source.expression) is ast.Column:
+            name = getattr(source.expression, "name", None)
+            if name not in _READONLY_TABLES:
+                raise QueryRejected("Query may only use accounts and transactions tables")
+            if source.open is None and source.close is None and source.clear is None:
+                source_rewrites.append((select, name))
+                continue
+        raise QueryRejected("Query requires an explicit accounts or transactions source")
+
+    # Bare FROM names are parsed as expressions. Resolve them explicitly rather
+    # than retaining Beanquery's implicit postings table or column-name fallback.
+    # Do this only after the complete AST passed the bounded validation above.
+    for select, name in source_rewrites:
+        select.from_clause = ast.Table(name)
 
 
 def _dataset(connection):
@@ -290,10 +311,9 @@ def _worker() -> None:
             raise QueryRejected("Query dataset exceeds byte limit")
         entries, options = pickle.loads(dataset)
         connection = beanquery.connect("beancount:", entries=entries, errors=[], options=options)
-        connection.tables = {
-            name: table for name, table in connection.tables.items()
-            if name is None or name in _READONLY_TABLES
-        }
+        for name in list(connection.tables):
+            if name not in _READONLY_TABLES:
+                del connection.tables[name]
         rows = connection.execute(statement).fetchall()
         if len(rows) > MAX_ROWS:
             raise QueryRejected("Query exceeds row limit")

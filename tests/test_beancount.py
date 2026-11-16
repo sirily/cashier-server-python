@@ -29,7 +29,7 @@ def beancount_client(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_beancount_method(beancount_client):
-    assert await main.beancount("SELECT 1 LIMIT 1") == [(1,)]
+    assert await main.beancount("SELECT 1 FROM #accounts LIMIT 1") == [(1,)]
 
 
 @pytest.mark.parametrize("query,expected", [

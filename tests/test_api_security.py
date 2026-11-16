@@ -56,6 +56,14 @@ def test_non_ascii_bearer_is_rejected_not_crash(api):
     "CREATE TABLE accounts (account str)",
     "INSERT INTO accounts (account) VALUES ('Assets:Fake')",
     "CREATE TABLE external USING 'csv:/outside/secret.txt'",
+    "BALANCES",
+    "JOURNAL",
+    "PRINT",
+    "SELECT account",
+    "SELECT * FROM #entries",
+    "SELECT * FROM (SELECT * FROM #postings)",
+    "SELECT payee FROM transactions WHERE payee IN (SELECT payee)",
+    "SELECT payee FROM transactions CLOSE",
 ])
 def test_http_bql_only_reads_original_tables(api, query):
     response = api.get("/", params={"query": query})
