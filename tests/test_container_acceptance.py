@@ -217,6 +217,87 @@ class TestContainerAcceptance:
         status, _ = _get("/infrastructure", params={"file_path": "credentials.txt"})
         assert status == 403
 
+    def test_writeback_on_single_writable_file_mount(self, tmp_path):
+        """Exercise the deployed ro-directory/rw-file boundary with the nonroot image."""
+        root = tmp_path / "ledger"
+        root.mkdir(mode=0o755)
+        book = root / "main.bean"
+        book.write_text(
+            '2024-01-01 open Assets:Cash USD\n'
+            '2024-01-01 open Expenses:Food USD\n'
+            'include "manual_transactions.bean"\n', encoding="utf-8",
+        )
+        book.chmod(0o644)
+        manual = root / "manual_transactions.bean"
+        manual.write_text("; retain this source comment\n", encoding="utf-8")
+        manual.chmod(0o666)  # Synthetic fixture only: permit the container's app UID.
+        before = {path.name: path.read_bytes() for path in root.iterdir()}
+        name = f"{CONTAINER_NAME}-writeback"
+        transaction = (
+            '2026-05-28 * "Shop" "Lunch"\n'
+            '  cashier_id: "container-writeback-security"\n'
+            '  Assets:Cash -5 USD\n'
+            '  Expenses:Food 5 USD\n'
+        )
+        try:
+            subprocess.run(
+                ["docker", "run", "-d", "--name", name,
+                 "-p", "127.0.0.1::3000", "-v", f"{root}:/workspace:ro",
+                 "-v", f"{manual}:/workspace/manual_transactions.bean:rw",
+                 "-e", "BEANCOUNT_FILE=/workspace/main.bean",
+                 "-e", "BEANCOUNT_MANUAL_TRANSACTIONS_FILE=/workspace/manual_transactions.bean",
+                 "-e", "CASHIER_API_TOKEN", IMAGE_TAG],
+                check=True, capture_output=True, timeout=30,
+                env={**os.environ, "CASHIER_API_TOKEN": AUTH_CREDENTIAL},
+            )
+            binding = subprocess.run(
+                ["docker", "port", name, "3000/tcp"],
+                check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            port = int(binding.rsplit(":", 1)[1])
+
+            def request(path, payload=None):
+                data = json.dumps(payload).encode() if payload is not None else None
+                headers = {"Authorization": f"Bearer {AUTH_CREDENTIAL}"}
+                if data is not None:
+                    headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    assert response.status == 200
+                    return json.load(response)
+
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    assert request("/health")["beancount_loaded"] is True
+                    break
+                except (urllib.error.URLError, ConnectionError, OSError):
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.2)
+            expected = {"synchronized": ["container-writeback-security"], "rejected": []}
+            assert request("/xact", {"transactions": [transaction, transaction]}) == expected
+            committed = manual.read_bytes()
+            assert committed.startswith(before[manual.name])
+            assert committed.count(b"container-writeback-security") == 1
+            assert request("/xact", {"transactions": [transaction]}) == expected
+            assert manual.read_bytes() == committed
+            assert request("/?query=" + quote("SELECT payee FROM transactions")) == [["Shop"]]
+            pulled = request("/infrastructure?file_path=main.bean")["content"]
+            assert 'cashier_id: "container-writeback-security"' in pulled
+            assert '"Shop" "Lunch"' in pulled
+            assert {path.name for path in root.iterdir()} == set(before)
+            assert book.read_bytes() == before[book.name]
+            boundary = subprocess.run(
+                ["docker", "exec", name, "/app/.venv/bin/python", "-c",
+                 "from pathlib import Path; Path('/workspace/forbidden.bean').write_text('not allowed')"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            assert boundary.returncode != 0
+            assert "Read-only file system" in boundary.stderr
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
+
     def test_missing_token_container_refuses_startup(self):
         name = f"{CONTAINER_NAME}-missing-token"
         try:
