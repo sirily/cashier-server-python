@@ -66,7 +66,7 @@ Publication builds a **fresh final image from the squash commit**, not by promot
 | Gate | Coverage |
 | --- | --- |
 | Workflow syntax | Checksum-verified Actionlint 1.7.7 with ShellCheck; root workflows checked using an isolated empty configuration |
-| Python 3.12 and 3.13 | Locked dependency installation, version validation, Ruff linting, Basedpyright type checking, Node release regression tests, and the Python test suite |
+| Python 3.12 and 3.13 | Locked dependency installation, version validation, Ruff linting, Basedpyright type checking, HTTP contract baseline compatibility, Node release regression tests, and the Python test suite |
 | Wheel | Build on both Python versions; verify application modules, package name/version, and the `cashier-server = main:main` entry point |
 | Production platforms | Non-pushing Docker builds for both `linux/amd64` and `linux/arm64` |
 | Container acceptance | Build the production Dockerfile; exercise authentication, runtime plugins, read-only ledger fixtures, and RustLedger snapshot parsing |
@@ -81,6 +81,7 @@ node scripts/release.mjs validate-version
 node --test scripts/release-tests.mjs
 uv run --locked ruff check .
 uv run --locked basedpyright --warnings
+uv run --locked python scripts/check_api_contract.py
 uv run --locked pytest --timeout=180 -v
 uv build --wheel
 ```
@@ -96,6 +97,8 @@ uv run --locked --group dev python scripts/audit.py --image cashier-auth-server:
 ```
 
 The skip-build override reuses the image built immediately beforehand from the same source. Without the override, container acceptance builds its own image. A normal Python test run skips container acceptance unless `DOCKER_ACCEPTANCE=true` is set.
+
+HTTP contract compatibility and deliberate major-baseline migrations are documented in [`api/README.md`](api/README.md). Contract versioning is separate from the owner-selected server release version. Regenerating OpenAPI must not silently replace the baseline.
 
 Acceptance requires `@rustledger/wasm@0.14.1` to parse the standalone snapshot with **0 parse errors**. Preserve source-preserving export, Python plugin materialization, include/glob behavior, and RustLedger boundary coverage. Python tests also cover manual-transaction validation, `cashier_id` deduplication/conflicts, partial success, and single-file writeback constraints.
 

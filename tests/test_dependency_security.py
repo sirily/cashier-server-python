@@ -49,15 +49,47 @@ def test_resolution_preserves_security_floor(name, minimum):
 
 def test_production_image_pins_base_and_installer_without_retaining_uv_cache():
     dockerfile = (ROOT / "Dockerfile").read_text()
-    assert re.search(
-        r"^FROM python:3\.12\.\d+-slim-trixie@sha256:[0-9a-f]{64}$",
-        dockerfile,
-        re.MULTILINE,
+    dockerfile = re.sub(r"\\\n\s*", " ", dockerfile)
+    dockerfile = re.sub(r"^\s*#.*$", "", dockerfile, flags=re.MULTILINE)
+    stages = re.findall(r"^FROM ([^\n]+)\n(.*?)(?=^FROM |\Z)", dockerfile, re.MULTILINE | re.DOTALL)
+    assert len(stages) == 3, "Expected separate base, builder and runtime stages"
+    assert re.fullmatch(
+        r"python:3\.12\.16-slim-trixie@sha256:[0-9a-f]{64} AS base",
+        stages[0][0],
     )
-    assert "apt-get upgrade -y --no-install-recommends" in dockerfile
-    assert "python -m pip install --no-cache-dir --upgrade pip==26.3 uv==0.13.8" in dockerfile
-    assert "python -m pip uninstall --yes pip" in dockerfile
-    sync = next(line for line in dockerfile.splitlines() if line.startswith("RUN uv sync "))
-    assert {"--locked", "--no-dev", "--no-cache"} <= set(sync.split())
-    assert "USER app" in dockerfile
+    assert [header for header, _ in stages[1:]] == ["base AS builder", "base AS runtime"]
+    base, builder, runtime = [body for _, body in stages]
+
+    assert "PYTHONDONTWRITEBYTECODE=1" in base
+    assert "PYTHONUNBUFFERED=1" in base
+    assert 'PATH="/app/.venv/bin:$PATH"' in base
+    assert re.search(r"^WORKDIR /app$", base, re.MULTILINE)
+    assert "apt-get update" in base
+    assert "apt-get upgrade -y --no-install-recommends" in base
+    assert "apt-get install -y --no-install-recommends curl ca-certificates" in base
+    assert "rm -rf /var/lib/apt/lists/*" in base
+    assert not re.search(r"^(?:COPY|ADD)\b", base, re.MULTILINE)
+
+    for setting in ("UV_COMPILE_BYTECODE=1", "UV_LINK_MODE=copy", "UV_PYTHON_DOWNLOADS=never"):
+        assert setting in builder
+        assert setting not in base + runtime
+    assert re.search(r"apt-get install\b[^&\n]*\bgit\b", builder)
+    assert "rm -rf /var/lib/apt/lists/*" in builder
+    assert "python -m pip install --no-cache-dir --upgrade pip==26.3 uv==0.13.8" in builder
+    assert "python -m pip uninstall --yes pip" in builder
+    sync = next(line for line in builder.splitlines() if line.startswith("RUN uv sync "))
+    assert {"--locked", "--no-dev", "--no-cache", "--no-editable"} <= set(sync.split())
+
+    assert not re.search(r"\b(?:git|uv|uvx)\b", base + runtime)
+    assert "pip install" not in base + runtime
+    assert "python -m pip uninstall --yes pip" in runtime
+    copies = re.findall(r"^(?:COPY|ADD)\b[^\n]*", runtime, re.MULTILINE)
+    assert copies == ["COPY --from=builder /app/.venv /app/.venv"]
+    assert "groupadd --system app" in runtime
+    assert re.search(r"\buseradd\b[^&\n]*--system\b[^&\n]*\bapp\b", runtime)
+    assert re.search(r"^USER app$", runtime, re.MULTILINE)
+    assert "ENV BEANCOUNT_FILE=/workspace/main.bean" in runtime
+    assert re.search(r"^EXPOSE 3000$", runtime, re.MULTILINE)
+    assert re.search(r"^HEALTHCHECK\b[^\n]*\bCMD curl -fsS http://127\.0\.0\.1:3000/health\b", runtime, re.MULTILINE)
+    assert 'CMD ["cashier-server"]' in runtime
     assert not re.search(r"^VOLUME\b", dockerfile, re.MULTILINE)

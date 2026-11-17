@@ -1,0 +1,691 @@
+{
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "beancount_file_configured": {
+            "title": "Beancount File Configured",
+            "type": "boolean"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "beancount_file_configured"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "JsonValue": {},
+      "SnapshotBuildDetail": {
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "errors"
+        ],
+        "title": "SnapshotBuildDetail",
+        "type": "object"
+      },
+      "SnapshotBuildErrorResponse": {
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotBuildDetail"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ValidationIssue"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "SnapshotBuildErrorResponse",
+        "type": "object"
+      },
+      "SnapshotResponse": {
+        "properties": {
+          "content": {
+            "description": "Standalone source-preserving Beancount ledger text.",
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "SnapshotResponse",
+        "type": "object"
+      },
+      "ValidationErrorResponse": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationIssue"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ValidationErrorResponse",
+        "type": "object"
+      },
+      "ValidationIssue": {
+        "properties": {
+          "ctx": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ctx"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Loc",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Msg",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationIssue",
+        "type": "object"
+      },
+      "XactRejected": {
+        "properties": {
+          "cashier_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null when no valid ID could be recovered.",
+            "title": "Cashier Id"
+          },
+          "reason": {
+            "description": "Concrete per-item validation or conflict reason.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cashier_id",
+          "reason"
+        ],
+        "title": "XactRejected",
+        "type": "object"
+      },
+      "XactRequest": {
+        "properties": {
+          "transactions": {
+            "description": "Up to 100 completed * Beancount transaction strings, each with stable cashier_id metadata.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Transactions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transactions"
+        ],
+        "title": "XactRequest",
+        "type": "object"
+      },
+      "XactResponse": {
+        "properties": {
+          "rejected": {
+            "description": "Per-item rejections; mixed batches still return HTTP 200.",
+            "items": {
+              "$ref": "#/components/schemas/XactRejected"
+            },
+            "title": "Rejected",
+            "type": "array"
+          },
+          "synchronized": {
+            "description": "Newly committed and already-equivalent cashier_ids.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Synchronized",
+            "type": "array"
+          }
+        },
+        "required": [
+          "synchronized",
+          "rejected"
+        ],
+        "title": "XactResponse",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "CashierBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Beancount synchronization server for Cashier PWA",
+    "title": "Cashier Server",
+    "version": "0.14.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "No bearer token required. Reports whether BEANCOUNT_FILE is configured without reading or validating the ledger.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid Host or Content-Length; malformed request."
+          },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request body receive deadline exceeded (15 seconds)."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 1 MiB or query string exceeds 64 KiB."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Uvicorn connection/task admission limit exceeded, before the application handles health."
+          }
+        },
+        "security": [],
+        "summary": "Public lightweight health check"
+      }
+    },
+    "/infrastructure": {
+      "get": {
+        "description": "Build the standalone source-preserving root ledger for offline PWA parsing.\n\n`file_path` must be exactly the configured BEANCOUNT_FILE basename (for example\n`main.bean`), never a client-selected included file. Includes/globs are resolved\nserver-side; unchanged source directives stay verbatim and Python plugin output\nis materialized only under the snapshot export policy. Each request captures current\nsource files, including newly matched glob files; no snapshot cache or stale-success\nfallback is used. Read or materialization failure is a request error. Exact `@@` total prices\nare preserved in storage and snapshot, never converted to rounded `@` unit prices.\nBuild errors fail closed with `detail: {message, errors: [string]}`, never raw source.\nCapture limits: 16 MiB per file, 64 MiB captured/expanded sources, 4096 files/include\nvisits, 64 include levels. Reads reject unsafe paths and symlinks. Only the configured\nroot is exposed; individual included/manual files and HTTP glob requests get 403.",
+        "operationId": "infrastructure_file_infrastructure_get",
+        "parameters": [
+          {
+            "description": "Required configured BEANCOUNT_FILE basename only; no arbitrary file access.",
+            "in": "query",
+            "name": "file_path",
+            "required": true,
+            "schema": {
+              "description": "Required configured BEANCOUNT_FILE basename only; no arbitrary file access.",
+              "examples": [
+                "main.bean"
+              ],
+              "title": "File Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            },
+            "description": "Configured root snapshot, not arbitrary file access."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request, control characters, or path longer than 1024 characters."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid deployment-scoped bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "const": "Bearer",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Absolute, hidden, traversal, glob, or non-root path rejected."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Empty path has no file component."
+          },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request body receive deadline exceeded (15 seconds)."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 1 MiB or query string exceeds 64 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotBuildErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot build failure (detail.message/errors), or request validation (detail array)."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing server configuration or a safe ledger pipeline/filesystem failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server token not configured or all four heavy-operation slots busy. Uvicorn may instead return plain text when its 64-connection concurrency limit is reached."
+          }
+        },
+        "security": [
+          {
+            "CashierBearer": []
+          }
+        ],
+        "summary": "Export the configured root ledger snapshot"
+      }
+    },
+    "/ping": {
+      "get": {
+        "description": "Requires the deployment bearer token; returns the JSON string \"pong\".",
+        "operationId": "ping_ping_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": "pong",
+                "schema": {
+                  "const": "pong",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "JSON string pong."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid Host or Content-Length; malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid deployment-scoped bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "const": "Bearer",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request body receive deadline exceeded (15 seconds)."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 1 MiB or query string exceeds 64 KiB."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server token not configured or all four heavy-operation slots busy. Uvicorn may instead return plain text when its 64-connection concurrency limit is reached."
+          }
+        },
+        "security": [
+          {
+            "CashierBearer": []
+          }
+        ],
+        "summary": "Authenticated liveness check"
+      }
+    },
+    "/xact": {
+      "post": {
+        "description": "Synchronize up to 100 Beancount transaction strings; not a general mutation API.\n\nOnly Cashier-created completed `*` transactions with stable `cashier_id` metadata\nand already-known server accounts are accepted. Incomplete `!` transactions,\ninclude/plugin/option/open/close/balance/pad and all other directives are rejected.\nSame cashier_id + same transaction is idempotent: synchronized without appending.\nSame cashier_id + different transaction is rejected as a conflict, never overwritten.\nMixed batches have partial success: valid items commit; invalid items receive\nconcrete reasons in `rejected` at HTTP 200. A rejection may have null `cashier_id`\nwhen an ID cannot be recovered. `synchronized` includes both new and existing IDs.\n\nThe only target is configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE, normally\n/workspace/manual_transactions.bean, the sole rw file in a read-only workspace.\nNo client target path or writable ledger directory is accepted. Under a file lock,\nthe server captures current files, rereads/deduplicates, builds a private candidate, validates it through\nthe configured full-root BEANCOUNT_FILE pipeline, then performs a crash-conscious\nsingle-file write. This is not an atomic rename or a promise of crash atomicity.\nExact `@@` total prices survive storage and snapshot without rounded `@` conversion.\nEquivalent retries compare normalized transaction content, not literal whitespace;\ndiffering total amount, currency or @/@@ notation is a conflict. Full-pipeline failure\ncan reject the entire pending new subset; HTTP 200 alone never means every item synced.\nLimits per item: 64 KiB UTF-8, 256 postings, 64 metadata fields, metadata keys at most\n64 characters and string values at most 1024 UTF-8 bytes. cashier_id is case-sensitive\nASCII, 1..128 characters, starts with a letter/digit, followed by letters/digits or\n`.`, `_`, `:`, `-`. Violations are per-item rejections, not request-schema errors.",
+        "operationId": "write_xact_xact_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/XactRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/XactResponse"
+                }
+              }
+            },
+            "description": "Synchronized IDs and per-item rejections, including mixed partial success."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid Host or Content-Length; malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid deployment-scoped bearer token.",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "const": "Bearer",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request body receive deadline exceeded (15 seconds)."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 1 MiB or query string exceeds 64 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid JSON/request types or batch exceeds 100 items."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing server configuration or a safe ledger pipeline/filesystem failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server token not configured or all four heavy-operation slots busy. Uvicorn may instead return plain text when its 64-connection concurrency limit is reached."
+          }
+        },
+        "security": [
+          {
+            "CashierBearer": []
+          }
+        ],
+        "summary": "Synchronize Cashier manual transactions"
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Server-relative paths; external prefix and proxy limits are deployment configuration.",
+      "url": "/"
+    }
+  ],
+  "x-cashier-limits": {
+    "body_receive_seconds": 15,
+    "cashier_id_characters": 128,
+    "heavy_operation_slots": 4,
+    "ledger_capture_bytes": 67108864,
+    "ledger_expanded_bytes": 67108864,
+    "ledger_file_bytes": 16777216,
+    "ledger_files": 4096,
+    "ledger_include_depth": 64,
+    "ledger_include_visits": 4096,
+    "query_string_bytes": 65536,
+    "request_body_bytes": 1048576,
+    "snapshot_path_characters": 1024,
+    "uvicorn_concurrency": 64,
+    "xact_batch_items": 100,
+    "xact_metadata_fields": 64,
+    "xact_metadata_key_characters": 64,
+    "xact_metadata_string_bytes": 1024,
+    "xact_postings": 256,
+    "xact_transaction_bytes": 65536
+  },
+  "x-contract-version": "2.0.0"
+}

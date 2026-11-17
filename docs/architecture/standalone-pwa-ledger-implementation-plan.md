@@ -184,7 +184,7 @@ reject(entry_or_source, reason)
 
 ## 8. Этап 5: сборщик и endpoint
 
-`StandaloneSnapshotBuilder` заменяет только способ формирования root-файла при запросе:
+`StandaloneSnapshotBuilder` формирует автономный snapshot настроенного root при запросе:
 
 ```http
 GET /infrastructure?file_path=main.bean
@@ -196,6 +196,8 @@ GET /infrastructure?file_path=main.bean
 - обработка errors через HTTP `422`, если книгу нельзя безопасно материализовать;
 - безопасность разрешения путей;
 - read-only режим.
+
+Endpoint обслуживает только root из `BEANCOUNT_FILE`: `file_path` обязателен и указывает его имя относительно директории книги. Остальные файлы и любые HTTP glob-запросы возвращают `403`; клиент использует один root snapshot, а include/glob исходной книги обрабатываются внутри серверного сборщика. Ошибка сборки не допускает выдачу исходного текста вместо snapshot.
 
 В diagnostic logging должны быть доступны счётчики:
 

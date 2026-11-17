@@ -4,7 +4,7 @@ Cashier synchronization server, in Python
 
 Beancount synchronization server for [Cashier](https://github.com/alensiljak/cashier) PWA, implemented in Python with FastAPI.
 
-The server executes BQL queries for Accounts and Payees, serves a source-preserving standalone Beancount snapshot for offline sync, and accepts the narrow manual transaction writeback channel. Beancount is the only supported backend; Ledger CLI is not used.
+The server serves a source-preserving standalone Beancount snapshot for offline sync and accepts the narrow manual transaction writeback channel. It provides no server query API or ledger cache. Accounts, payees and balances are derived by the client from the snapshot. Beancount is the only supported backend; Ledger CLI is not used.
 
 ## Installation
 
@@ -15,41 +15,36 @@ The server executes BQL queries for Accounts and Payees, serves a source-preserv
 
 Set `BEANCOUNT_FILE` to the root of your Beancount book and `CASHIER_API_TOKEN` to a deployment-scoped bearer token. You can set these environment variables in an `.env` file in the working directory.
 
-Both settings are required: the server refuses to start without either one. If imported as an ASGI application without `BEANCOUNT_FILE`, BQL and reload requests return HTTP 500 with `BEANCOUNT_FILE must be configured`, never a Ledger CLI fallback.
+Both settings are required: the entry point refuses to start without either one. Startup and health do not load or validate the ledger. Each snapshot and writeback captures the current source files; configuration, read and validation errors fail the request instead of returning a cached success. If imported as an ASGI application without `BEANCOUNT_FILE`, snapshot requests return HTTP 500, never a Ledger CLI fallback.
 
 Send `Authorization: Bearer <your-token>` on API requests. `/health` is available without authentication for container probes.
 
-### Configure Certificates
+### HTTPS and same-origin deployment
 
-Create a self-signed certificate with OpenSSL.
+Terminate HTTPS at the external reverse proxy and forward requests through Caddy to the server over internal HTTP. Serve the PWA and API under the same browser origin. The external prefix (for example `/api/`), routing and proxy request/connection/time limits are determined by deployment configuration, not hardcoded by the server.
 
-Add `CASHIER_SSL_KEY` and `CASHIER_SSL_CERT` paths to `.env` file, pointing to generated `key.pem` and `cert.pem`.
-
-#### Android
-
-On Android, import the `cert.pem`. Usually Settings -> Security -> Install certificate -> CA Certificate.
-
-Then, open the Cashier Server URL in the browser and accept the self-signed certificate.
+The server does not load TLS certificates or provide CORS support. Direct HTTPS startup and separate-origin browser clients are no longer supported. Remove `CASHIER_SSL_KEY`, `CASHIER_SSL_CERT`, certificate/key mounts used only by this server, and `CASHIER_CORS_ORIGINS` from existing deployments; those environment variables are no longer read.
 
 ## Run
 
 Execute the `cashier-server` script provided by the `cashier-server` package.
 
-The server runs on 0.0.0.0:3000, matching the Rust implementation.
+The server listens for internal HTTP on 0.0.0.0:3000. Do not expose this port publicly.
 
 ## API Endpoints
 
-- `/?query=SELECT...` - Execute a Beancount BQL query, including Accounts and Payees queries
+The versioned [OpenAPI v2 contract](docs/api/openapi-v2.json) describes requests, responses, bearer authentication, errors and server limits. [Server guarantees and compatibility](docs/api/README.md) cover idempotency, partial success, exact `@@` totals and the baseline compatibility gate. Paths are server-relative; external prefixes and proxy limits are deployment configuration.
+
+
 - `/ping` - Simple authenticated liveness check
 - `/health` - Unauthenticated container health/status check
-- `/reload` - Reload the Beancount data
-- `/infrastructure?file_path=config.bean` - Return a Beancount workspace file as `{ "content": "..." }`
-- `/infrastructure?file_path=prices/*.bean` - Return matching Beancount workspace files as `{ "files": [{ "path": "prices/2024.bean", "content": "..." }] }`
-- `/xact` - Stage 2 manual transaction writeback endpoint. Deployment exposes it as `/api/xact`; it accepts only Cashier-created completed transaction directives with `cashier_id` and writes only to the configured `BEANCOUNT_MANUAL_TRANSACTIONS_FILE`.
 
-`/hello` and `/shutdown` have been removed and return `404` for authenticated requests. Stop the process through your service manager or container runtime; `CASHIER_ENABLE_SHUTDOWN` is no longer a supported setting.
+- `/infrastructure?file_path=main.bean` - Return the standalone snapshot of the configured `BEANCOUNT_FILE` as `{ "content": "..." }`. Use the configured root's filename if it is not `main.bean`. Individual files and glob requests are not supported.
+- `/xact` - Stage 2 manual transaction writeback endpoint (for example `/api/xact` with a deployment prefix); it accepts only Cashier-created completed transaction directives with `cashier_id` and writes only to the configured `BEANCOUNT_MANUAL_TRANSACTIONS_FILE`.
 
-CORS allows all origins by default. Set `CASHIER_CORS_ORIGINS` to a comma-separated origin list to restrict it; wildcard origins do not enable credentials.
+Contract v2 intentionally removes `GET /?query=...` and `GET /reload`; both return `404` for authenticated requests. The old BQL worker/cache and health field `beancount_loaded` are gone. Migrate clients to the root snapshot and local parsing; no reload call is needed. The archived v1 baseline and explicit v1→v2 migration record are in `docs/api/baselines/`.
+
+`/hello` and `/shutdown` have also been removed and return `404` for authenticated requests. Stop the process through your service manager or container runtime; `CASHIER_ENABLE_SHUTDOWN` is no longer a supported setting.
 
 ## Stage 2 manual transaction writeback
 
@@ -80,6 +75,8 @@ environment:
 
 The root book and manual file must exist before starting the container. The image runs as a non-root user, which needs read access to the book and write access to the single manual file. Do not configure `CASHIER_ENABLE_SHUTDOWN` or install Ledger CLI.
 
+The Dockerfile installs locked production dependencies in a separate builder stage with Git and uv. The final stage copies only the non-editable application environment at `/app/.venv`; Git, uv, pip, build caches, and development tools are not included. Runtime starts `cashier-server` directly, without installing or resolving dependencies. Curl remains available for the container health check.
+
 Do not configure a writable directory or client-controlled write path.
 
 Writeback preserves exact total prices (`@@ 1.00 USD`) in the manual file and the standalone snapshot, without deriving them from rounded unit prices. Explicit unit prices (`@`) remain unit prices. Retries retain the same `cashier_id` without appending another copy; changing the total, currency, or price notation under an existing ID is a conflict. Previously stored `@` entries are not automatically converted back to `@@`: the original total cannot be recovered reliably from a rounded unit price and must be reviewed by the owner.
@@ -87,13 +84,12 @@ Writeback preserves exact total prices (`@@ 1.00 USD`) in the manual file and th
 ## Security boundaries and limits
 
 - Run the server on Linux (the supplied container is supported). Safe reads require `O_NOFOLLOW`, descriptor-relative opens and `/proc/self/fd`; writeback additionally requires POSIX `flock`. Native Windows execution is not supported by the hardened filesystem protocol.
-- Use HTTPS at the reverse proxy or configure both TLS files. Do not expose plain HTTP port 3000 publicly. Keep proxy/body/connection limits enabled and restrict CORS to the PWA origin where possible.
+- Use HTTPS at the external reverse proxy and keep HTTP port 3000 on the private proxy/container network. Serve the PWA and API same-origin; the server sends no CORS permission headers. Keep proxy/body/connection limits enabled.
 - The health exemption uses the ASGI path, never a URL reconstructed from `Host`. Malformed or duplicate Host headers are rejected; protected routes always require the bearer token.
-- BQL is a read-only channel: `SELECT`, `BALANCES`, `JOURNAL`, and `PRINT` over the initial Beancount tables. `CREATE`, `INSERT`, external data sources and mutable shared query tables are forbidden. Writing from the PWA still uses `/xact`, not BQL.
-- BQL workers have a 5-second execution deadline, 1 GiB address-space limit, 16 KiB query/512-node AST limits, and 10,000-row/8 MiB HTTP JSON response limits (the internal worker response is bounded separately). A timeout kills and reaps the worker. Expensive operations have four admission slots per server process; excess work receives `503` rather than waiting unboundedly. The built-in entry point also limits concurrent connections to 64.
+- Snapshot and writeback operations have four admission slots per server process; excess work receives `503` rather than waiting unboundedly. The built-in entry point limits concurrent connections/tasks to 64. HTTP, source capture and writeback limits remain active; there is no BQL execution channel.
 - Requests are capped at 1 MiB and query strings at 64 KiB; receiving the body has a 15-second deadline. `/xact` accepts at most 100 items, 64 KiB per transaction, 256 postings and 64 metadata fields. `cashier_id` is a case-sensitive ASCII key, at most 128 characters, beginning with a letter or digit and containing only letters, digits, `.`, `_`, `:`, or `-`. Existing noncanonical IDs must be corrected by the owner before writeback is enabled; IDs are never silently rewritten.
-- Legacy infrastructure reads return only nonhidden `.bean`/`.beancount` files. Secrets, backups and unrelated files belong outside the ledger directory. Glob responses remain raw source; a literal root request produces the standalone snapshot. Neither mechanism follows symlinks. Keep the configured root and every parent path free of symlinks.
-- The ledger is captured through bounded no-follow reads before loading. Limits are 16 MiB per file (including the manual file and recovery comments), 64 MiB per capture/expanded include graph, 4,096 files/include visits and 64 include levels. Absolute, escaping, encrypted and unsafe includes fail closed. Snapshot, BQL preload and writeback use private captured source copies outside the ledger tree.
+- `/infrastructure` serves only the configured root's standalone snapshot; `file_path` remains required and must identify that root by its filename, relative to its directory. Other paths, including included files, `manual_transactions.bean` when it is not the configured root, and all glob patterns, return HTTP 403. Multi-file HTTP import is no longer supported: clients must request the root snapshot. The server still expands the root's includes/globs and executes configured plugins while building the snapshot, without exposing raw source files. Build errors return HTTP 422, never raw-source fallback. Secrets, backups and unrelated files belong outside the ledger directory. Keep the configured root and every parent path free of symlinks.
+- The ledger is captured through bounded no-follow reads before loading. Limits are 16 MiB per file (including the manual file and recovery comments), 64 MiB per capture/expanded include graph, 4,096 files/include visits and 64 include levels. Absolute, escaping, encrypted and unsafe includes fail closed. Snapshot and writeback use private captured source copies outside the ledger tree.
 - A source-only capture supports relative include/glob files and configured server-installed plugins. `Document` directives, `option "documents"`, `insert_pythonpath`, encrypted roots and environment-expanded root names are not supported; they fail closed rather than silently losing auxiliaries or importing workspace Python. Trusted installed plugins are not sandboxed and can still access resources permitted to the server process. Do not enable untrusted plugins.
 - The existing manual file must be included exactly once in the configured full ledger. Each writer holds an exclusive lock on its pinned file descriptor through reread, validation and durable append. All other writers must honor the same lock; the read-only parent mount remains required. Only the mounted manual file is written.
 
@@ -133,7 +129,7 @@ uv run cashier-server
 uv run python main.py
 ```
 
-Use this entry point rather than a bare `uvicorn main:app` invocation so that the BQL connection is preloaded and configuration is checked before serving requests. On Windows, run the Linux container (for example under WSL2); the historical `.cmd` helpers do not provide the POSIX filesystem guarantees.
+Use this entry point rather than a bare `uvicorn main:app` invocation so that required configuration is checked before serving requests. The ledger is read and validated on demand, not preloaded. On Windows, run the Linux container (for example under WSL2).
 
 ## Notes on the Implementation
 

@@ -584,17 +584,3 @@ class LedgerWorkspace:
                     os.close(descriptor)
         except OSError as exc:
             raise _source_error(exc) from exc
-
-
-@contextmanager
-def private_ledger_copy(
-    root_path: Path, overrides: dict[Path, bytes] | None = None
-) -> Iterator[Path]:
-    """Capture a safe source tree and yield its private root for the full loader.
-
-    This does not execute plugins. Callers must run the configured full pipeline
-    on the yielded path, not root_path. Overrides replace captured relative paths
-    only, and the candidate's decoded include closure is validated before yield.
-    """
-    with LedgerWorkspace.capture(root_path).private_copy(overrides) as private_root:
-        yield private_root

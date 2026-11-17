@@ -6,9 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "beancount>=3.2.0",
-    "beanquery>=0.2.0",
     "fastapi>=0.163.1",
-    "fava",
+    "fava", # Required by beancount_lazy_plugins.filter_map; includes Beanquery transitively.
     "loguru>=0.7.3",
     "python-dotenv>=1.2.2",
     "uvicorn>=0.42.0",
@@ -48,6 +47,7 @@ dev = [
     "httpx>=0.28.0",
     "ruff==0.17.5",
     "basedpyright==1.40.2",
+    "jsonschema>=4.25.1",
 ]
 
 [tool.pytest.ini_options]

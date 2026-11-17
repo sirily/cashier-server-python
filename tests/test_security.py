@@ -54,6 +54,47 @@ def test_api_fails_closed_when_token_is_not_configured(monkeypatch):
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize("path", ["/ping", "/xact", "/infrastructure"])
+def test_cors_preflight_does_not_bypass_authentication(configured_api_token, path):
+    response = client.options(
+        path,
+        headers={
+            "Authorization": "",
+            "Origin": "https://other.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert not any(name.startswith("access-control-") for name in response.headers)
+
+
+@pytest.mark.parametrize("path", ["/ping", "/health", "/xact"])
+def test_authenticated_preflight_is_not_supported(configured_api_token, path):
+    response = client.options(
+        path,
+        headers={
+            **configured_api_token,
+            "Origin": "https://other.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 405
+    assert not any(name.startswith("access-control-") for name in response.headers)
+
+
+@pytest.mark.parametrize("origin", ["http://testserver", "https://other.example", "null"])
+def test_origin_does_not_grant_cors_permissions(configured_api_token, origin):
+    response = client.get("/ping", headers={**configured_api_token, "Origin": origin})
+
+    assert response.status_code == 200
+    assert response.json() == "pong"
+    assert not any(name.startswith("access-control-") for name in response.headers)
+
+
 def test_server_refuses_to_start_without_token(monkeypatch):
     monkeypatch.setattr(main, "CASHIER_API_TOKEN", "")
 
@@ -79,13 +120,11 @@ def test_health_endpoint_reports_configured_bean_file(configured_test_book):
     assert response.json()["beancount_file_configured"] is True
 
 
-def test_infrastructure_returns_file_inside_ledger_directory(configured_test_book):
+def test_infrastructure_rejects_file_inside_ledger_directory(configured_test_book):
     response = client.get("/infrastructure", params={"file_path": "config.bean"})
 
-    assert response.status_code == 200
-    assert response.json()["content"] == Path(TEST_DIR, "config.bean").read_text(
-        encoding="utf-8"
-    )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Only the configured root snapshot is available"}
 
 
 def test_infrastructure_rejects_parent_directory_traversal(configured_test_book):
@@ -130,7 +169,7 @@ def test_infrastructure_glob_rejects_control_characters(configured_test_book):
     assert response.status_code == 400
 
 
-def test_infrastructure_glob_ignores_symlinks(configured_test_book, tmp_path, monkeypatch):
+def test_infrastructure_glob_cannot_enumerate_files_or_symlinks(configured_test_book, tmp_path, monkeypatch):
     root = tmp_path / "ledger"
     root.mkdir()
     (root / "book.bean").write_text("", encoding="utf-8")
@@ -142,13 +181,8 @@ def test_infrastructure_glob_ignores_symlinks(configured_test_book, tmp_path, mo
 
     response = client.get("/infrastructure", params={"file_path": "*.bean"})
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "files": [
-            {"path": "book.bean", "content": ""},
-            {"path": "inside.bean", "content": "inside"},
-        ]
-    }
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Only the configured root snapshot is available"}
 
 
 def test_infrastructure_rejects_encoded_traversal_and_does_not_exfiltrate(configured_test_book):
@@ -188,9 +222,9 @@ def test_infrastructure_symlink_to_outside_does_not_exfiltrate(configured_test_b
 
     assert literal_response.status_code == 403
     assert "SECRET_OUTSIDE_WORKSPACE" not in literal_response.text
-    assert glob_response.status_code == 200
+    assert glob_response.status_code == 403
     assert "SECRET_OUTSIDE_WORKSPACE" not in glob_response.text
-    assert [item["path"] for item in glob_response.json()["files"]] == ["book.bean"]
+    assert "files" not in glob_response.json()
 
 
 def test_infrastructure_root_rejects_symlink_include_before_materialization(
@@ -227,13 +261,13 @@ def test_infrastructure_file_path_is_not_executed_as_shell(configured_test_book,
 
 
 def test_infrastructure_glob_file_path_is_not_executed_as_shell(configured_test_book, tmp_path):
-    """Glob file_path is expanded by pathlib only and must not execute shell syntax."""
+    """Glob and shell syntax must be rejected without execution."""
     marker = tmp_path / "rce-marker-glob"
     payload = f"prices/*.bean; touch {marker}"
 
     response = client.get("/infrastructure", params={"file_path": payload})
 
-    assert response.status_code == 404
+    assert response.status_code == 403
     assert not marker.exists()
 
 
@@ -248,8 +282,8 @@ def test_infrastructure_does_not_call_subprocess_for_file_path(configured_test_b
     literal_response = client.get("/infrastructure", params={"file_path": "config.bean"})
     glob_response = client.get("/infrastructure", params={"file_path": "prices/*.bean"})
 
-    assert literal_response.status_code == 200
-    assert glob_response.status_code == 200
+    assert literal_response.status_code == 403
+    assert glob_response.status_code == 403
 
 
 @pytest.mark.parametrize("path", ["/hello", "/shutdown"])
