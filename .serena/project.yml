@@ -107,7 +107,7 @@ read_only: false
 # (contrary to the memories, which are loaded on demand).
 initial_prompt: >-
   Read AGENTS.md and docs/releasing.md before changing this repository.
-  Read the relevant docs/architecture documents before changing snapshot or
+  Read the relevant section of docs/architecture.md before changing snapshot or
   writeback behavior. Never access or index the production ledger workspace.
   Code navigation does not prove Beancount semantics or RustLedger compatibility;
   preserve the source-preserving snapshot and single-file writeback boundaries.

@@ -1,15 +1,7 @@
 # Cashier server HTTP contract v2
 
-[`openapi-v2.json`](openapi-v2.json) is the current version-controlled OpenAPI 3.1 contract. `x-contract-version` is **2.0.0**, intentionally incompatible with v1. `info.version` is the server release version; it is not the contract version and is selected separately by the repository owner.
+[`openapi-v2.json`](api/openapi-v2.json) is the current version-controlled OpenAPI 3.1 contract. `x-contract-version` is **2.0.0**, intentionally incompatible with v1. `info.version` is the server release version; it is not the contract version and is selected separately by the repository owner.
 
-## Intentional v1 → v2 migration
-
-- Removed `GET /?query=...` and `GET /reload`. Authenticated requests return `404`; the server has no BQL executor, worker, in-memory ledger connection or post-write cache refresh.
-- Removed `beancount_loaded` from health. Health reports the running process and whether a root is configured; it is not a ledger readiness/validation probe.
-- OpenAPI lists **server-relative paths** only. The previous `/api` server example is not a required deployment prefix. The actual external prefix and proxy limits belong to deployment configuration.
-- Clients must pull the standalone root snapshot, parse it locally and derive accounts/payees/balances there. After writeback, pull the root again and confirm `cashier_id`; no reload call is needed.
-
-The frozen [v1 baseline](baselines/openapi-v1.json) preserves the old contract for migration analysis, not as supported API documentation. [migration-v1-v2.json](baselines/migration-v1-v2.json) records the intentional incompatibilities, contract versions, reason and hashes of both frozen baselines. Tests verify that the compatibility checker actually detects this break and that the record has not silently drifted.
 
 ## Paths, deployment and authorization
 
@@ -20,7 +12,7 @@ The frozen [v1 baseline](baselines/openapi-v1.json) preserves the old contract f
 | Health | `GET /health` | Public |
 | Ping | `GET /ping` | Bearer |
 
-OpenAPI `servers: [{"url":"/"}]` describes server-relative addressing. A reverse proxy may expose `/xact` as `/api/xact`, but that prefix, any rewriting, TLS termination and proxy body/connection/time limits must be checked in the actual deployment. No `/api/...` routes are registered by the app. Proxy limits may reject requests before the server and are not promises made by the server's OpenAPI. The intended setup uses external HTTPS and same-origin PWA/API, with internal HTTP through Caddy; there is no direct server TLS or CORS mode.
+OpenAPI `servers: [{"url":"/"}]` describes server-relative addressing. A reverse proxy may expose `/xact` as `/api/xact`, but that prefix, any rewriting, TLS termination and proxy body/connection/time limits must be checked in the actual deployment. No `/api/...` routes are registered by the app. Proxy limits may reject requests before the server and are not promises made by the server's OpenAPI. See [Deployment](deployment.md) for mounting the ledger and serving the PWA and API on the same HTTPS origin.
 
 Send `Authorization: Bearer <CASHIER_API_TOKEN>`. Missing/invalid tokens return `401` and `WWW-Authenticate: Bearer`; missing server token configuration fails closed with `503`. The middleware also protects unknown routes and `OPTIONS`; authenticate when checking that a removed route returns `404`. Health is exempt from bearer authentication, not from Host or request-limit checks.
 
@@ -55,7 +47,16 @@ Capture uses descriptor-relative no-follow reads and rejects unsafe includes, sy
 - Snapshot path: at most 1024 characters, no controls/absolute/hidden/traversal paths; only the configured root basename is exposed.
 - Ledger capture: 16 MiB/file, 64 MiB captured/expanded input, 4096 files/include visits and 64 include levels. Directory scans/glob expansion also retain their existing finite budgets. Capture and pipeline errors fail closed.
 
-Missing configuration/filesystem/writeback pipeline failures can return `500` with string detail. FastAPI validation uses HTTP `422` with a detail array; snapshot build failures use a detail object. See the status-specific schemas in OpenAPI. The removed BQL resource limits are not represented as active server limits.
+Missing configuration/filesystem/writeback pipeline failures can return `500` with string detail. FastAPI validation uses HTTP `422` with a detail array; snapshot build failures use a detail object. See the status-specific schemas in OpenAPI.
+
+## Intentional v1 → v2 migration
+
+- Removed `GET /?query=...` and `GET /reload`. Authenticated requests return `404`; the server has no BQL executor or post-write cache refresh.
+- Removed `beancount_loaded` from health. Health reports the running process and whether a root is configured; it is not a ledger readiness probe.
+- OpenAPI lists server-relative paths only. The external `/api` prefix and proxy limits belong to deployment configuration.
+- Clients must pull the standalone root snapshot, parse it locally, and derive accounts, payees, and balances there. After writeback, pull again and confirm `cashier_id`; no reload call is needed.
+
+The frozen [v1 baseline](api/baselines/openapi-v1.json) is retained for migration analysis, not as supported API documentation. [migration-v1-v2.json](api/baselines/migration-v1-v2.json) records the intentional incompatibilities, contract versions, reason, and hashes of both frozen baselines.
 
 ## Compatibility gate and baseline updates
 
