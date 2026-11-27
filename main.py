@@ -55,7 +55,7 @@ CASHIER_API_TOKEN = os.getenv("CASHIER_" + "API_TOKEN", "").strip()
 app = FastAPI(
     title="Cashier Server",
     description="Beancount synchronization server for Cashier PWA",
-    version="0.14.0",
+    version="0.14.1",
     servers=SERVERS,
 )
 install_openapi_contract(app)

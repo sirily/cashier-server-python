@@ -4,22 +4,14 @@ This synchronous function must run in a worker, never on the event loop: flock
 covers capture, read, deduplication, validation and durable append. POSIX flock,
 O_NOFOLLOW and directory-relative opens are required; Windows fails closed.
 
-Each new batch has reserved ``; cashier-writeback-v1`` checksum comments. Its
-begin marker is fsynced before transaction bytes. A killed process can leave an
-unfinished batch, including a syntactically valid transaction prefix. On restart
-we refuse further writes rather than guessing which user bytes to discard. An
-operator must stop all writeback workers, preserve the damaged bytes for review,
-restore a verified known-good manual file, and validate the full ledger before
-restarting. Never discard an unverified suffix merely to clear a recovery error.
-Catchable append failures roll back to the original byte length only if the
-current bytes are a verified prefix of this attempt, then fsync under the same
-lock. This detects incomplete batches; it does not promise crash atomicity. No
-lockfile, journal, rename or temp file is used in the ledger.
+Catchable failures roll back to the original byte length if the current bytes
+are a verified prefix of this attempt, then fsync under the same lock. The write
+is not crash-atomic: a process kill can leave a prefix that still validates as
+Beancount.
 """
 
 from __future__ import annotations
 
-import hashlib
 import io
 import os
 import re
@@ -53,7 +45,6 @@ MAX_METADATA_KEY_LENGTH = 64
 MAX_METADATA_STRING_BYTES = 1024
 MAX_CASHIER_ID_LENGTH = 128
 
-_MARKER = b"; cashier-writeback-v1 "
 _TOTAL_PRICE = "__cashier_total_price__"
 # If even recovery fails, no later request in this worker may report success.
 _recovery_failures: set[tuple[int, int]] = set()
@@ -252,33 +243,6 @@ def _read_manual_transactions_bytes(fd: int) -> bytes:
     return b"".join(chunks)
 
 
-def _check_writeback_integrity(content: bytes) -> None:
-    digest = None
-    pending_hash = None
-    for line in content.splitlines(keepends=True):
-        if not line.endswith(b"\n") and _MARKER.startswith(line):
-            raise RuntimeError("Incomplete writeback marker; operator recovery is required")
-        if line.startswith(_MARKER):
-            parts = line.rstrip(b"\n").split(b" ")
-            if (
-                not line.endswith(b"\n") or len(parts) != 4
-                or parts[2] not in (b"begin", b"end")
-                or re.fullmatch(rb"[0-9a-f]{64}", parts[3]) is None
-            ):
-                raise RuntimeError("Incomplete writeback marker; operator recovery is required")
-            if parts[2] == b"begin":
-                if digest is not None:
-                    raise RuntimeError("Incomplete writeback batch; operator recovery is required")
-                digest, pending_hash = parts[3], hashlib.sha256()
-            else:
-                if pending_hash is None or digest != parts[3] or pending_hash.hexdigest().encode() != digest:
-                    raise RuntimeError("Corrupt writeback batch; operator recovery is required")
-                digest, pending_hash = None, None
-        elif pending_hash is not None:
-            pending_hash.update(line)
-    if pending_hash is not None:
-        raise RuntimeError("Incomplete writeback batch; operator recovery is required")
-
 
 def _capture_workspace(manual_file: str, previous: bytes) -> tuple[LedgerWorkspace, Path]:
     # Check platform support while opening/locking, before importing POSIX-only
@@ -425,21 +389,16 @@ def _normalize_entry(entry: data.Transaction) -> str:
 
 
 def _append_entries_to_source(existing_content: str, valid_new_entries: list) -> str:
-    """Preserve existing bytes and delimit the new batch for restart detection."""
-    blocks = [_normalize_entry(entry) for entry in valid_new_entries if isinstance(entry, data.Transaction)]
+    """Preserve existing bytes and append only normalized transactions."""
+    blocks = [_normalize_entry(entry).rstrip("\n") for entry in valid_new_entries if isinstance(entry, data.Transaction)]
     if not blocks:
         return existing_content
-    body = "\n\n".join(blocks) + "\n"
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     prefix = existing_content
     if prefix and not prefix.endswith("\n"):
         prefix += "\n"
-    if prefix.strip():
+    if prefix.strip() and not prefix.endswith("\n\n"):
         prefix += "\n"
-    return (
-        prefix + f"; cashier-writeback-v1 begin {digest}\n" + body
-        + f"; cashier-writeback-v1 end {digest}\n"
-    )
+    return prefix + "\n\n".join(blocks) + "\n"
 
 
 def _write_all(fd: int, content: bytes) -> None:
@@ -452,7 +411,7 @@ def _write_all(fd: int, content: bytes) -> None:
 
 
 def _write_file_crash_conscious(fd: int, previous_content: bytes, candidate_content: bytes) -> None:
-    """Append on the locked inode, with durable intent and catchable rollback."""
+    """Append and fsync on the locked inode, rolling back catchable failures."""
     from cashier_snapshot.workspace import MAX_FILE_BYTES
 
     if len(candidate_content) > MAX_FILE_BYTES:
@@ -464,14 +423,8 @@ def _write_file_crash_conscious(fd: int, previous_content: bytes, candidate_cont
     suffix = candidate_content[len(previous_content):]
     if not suffix:
         return
-    begin = suffix.find(_MARKER + b"begin ")
-    if begin < 0:
-        raise RuntimeError("Candidate is missing its writeback recovery marker")
-    boundary = suffix.index(b"\n", begin) + 1
     try:
-        _write_all(fd, suffix[:boundary])
-        os.fsync(fd)
-        _write_all(fd, suffix[boundary:])
+        _write_all(fd, suffix)
         os.fsync(fd)
         if _read_manual_transactions_bytes(fd) != candidate_content:
             raise RuntimeError("Manual transactions file changed during append; refusing to synchronize")
@@ -493,9 +446,7 @@ def _write_file_crash_conscious(fd: int, previous_content: bytes, candidate_cont
 def _validate_candidate_as_full_ledger(content: str, validation: _ValidationWorkspace, manual_relative: Path) -> list:
     """Revalidate the full candidate graph before a descriptor-pinned load."""
     try:
-        candidate = content.encode("utf-8")
-        _check_writeback_integrity(candidate)
-        validation.content = candidate
+        validation.content = content.encode("utf-8")
         _, errors = _load_workspace(validation, manual_relative)
         return errors
     except Exception as exc:
@@ -525,7 +476,6 @@ def validate_and_commit(transactions_texts: list[str]) -> tuple[dict, bool]:
 
     with _locked_manual_file(manual_file) as fd, ExitStack() as validation_stack:
         previous_bytes = _read_manual_transactions_bytes(fd)
-        _check_writeback_integrity(previous_bytes)
         existing_content = previous_bytes.decode("utf-8")
         existing_manual_entries, existing_errors, _ = _parse_source(existing_content, _TotalPriceBuilder())
         if existing_errors:

@@ -160,9 +160,9 @@ when an ID cannot be recovered. `synchronized` includes both new and existing ID
 The only target is configured BEANCOUNT_MANUAL_TRANSACTIONS_FILE, normally
 /workspace/manual_transactions.bean, the sole rw file in a read-only workspace.
 No client target path or writable ledger directory is accepted. Under a file lock,
-the server captures current files, rereads/deduplicates, builds a private candidate, validates it through
-the configured full-root BEANCOUNT_FILE pipeline, then performs a crash-conscious
-single-file write. This is not an atomic rename or a promise of crash atomicity.
+the server captures current files, rereads/deduplicates, builds a private candidate,
+validates it through the configured full-root BEANCOUNT_FILE pipeline, then durably
+appends accepted transactions to the configured file.
 Exact `@@` total prices survive storage and snapshot without rounded `@` conversion.
 Equivalent retries compare normalized transaction content, not literal whitespace;
 differing total amount, currency or @/@@ notation is a conflict. Full-pipeline failure

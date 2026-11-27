@@ -178,7 +178,7 @@ def test_writeback_total_price_partial_success_retry_and_conflict_follow_contrac
     assert result["rejected"][0]["cashier_id"] == "contract-invalid"
     assert "Unknown account" in result["rejected"][0]["reason"]
     committed = manual.read_bytes()
-    writeback._check_writeback_integrity(committed)
+    assert not any(line.startswith(b";") for line in committed.splitlines())
     assert b"@@ 1.00 USD" in committed and b" @ " not in committed
     retry = client.post("/xact", json={"transactions": [transaction]})
     assert retry.status_code == 200

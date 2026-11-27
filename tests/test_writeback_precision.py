@@ -35,7 +35,6 @@ def test_price_notation_survives_writeback_pull_and_retry(fx_ledger, postings, a
     assert response.status_code == 200
     assert response.json() == {"synchronized": ["exact-price"], "rejected": []}
     committed = fx_ledger.read_bytes()
-    writeback._check_writeback_integrity(committed)
 
     raw = client.get("/infrastructure", params={"file_path": "manual_transactions.bean"})
     snapshot = client.get("/infrastructure", params={"file_path": "main.bean"})
@@ -268,7 +267,6 @@ def test_crlf_unicode_prefix_and_high_precision_survive_retries(configured_env):
     assert first == {"synchronized": ["decimal-regression"], "rejected": []}
     committed = manual.read_bytes()
     assert committed.startswith(prefix)
-    writeback._check_writeback_integrity(committed)
     retry, wrote = writeback.validate_and_commit([text])
     assert not wrote
     assert retry == first

@@ -1,6 +1,5 @@
 """Security regressions for the single existing, bind-mounted write target."""
 
-import hashlib
 import multiprocessing
 import os
 from pathlib import Path
@@ -304,12 +303,14 @@ def test_catchable_partial_append_rolls_back_exact_bytes(configured_env, monkeyp
             if failure == "zero_write":
                 failed = True
                 return 0
+        if writes == 1 and failure != "fsync":
+            return original_write(fd, content[:10])
         return original_write(fd, content)
 
     def flaky_fsync(fd):
         nonlocal failed, syncs
         syncs += 1
-        if failure == "fsync" and syncs == 2:
+        if failure == "fsync" and syncs == 1:
             failed = True
             raise OSError("injected fsync failure")
         return original_fsync(fd)
@@ -319,7 +320,7 @@ def test_catchable_partial_append_rolls_back_exact_bytes(configured_env, monkeyp
     with pytest.raises(OSError):
         writeback.validate_and_commit([transaction()])
     assert failed
-    assert syncs >= (3 if failure == "fsync" else 2)
+    assert syncs == (2 if failure == "fsync" else 1)
     assert manual.read_bytes() == previous
     monkeypatch.setattr(os, "write", original_write)
     monkeypatch.setattr(os, "fsync", original_fsync)
@@ -333,15 +334,10 @@ def test_failed_recovery_poisoned_worker_and_restart_detects_suffix(configured_e
     manual = Path(configured_env)
     original_write = os.write
     original_truncate = os.ftruncate
-    writes = 0
 
     def flaky_write(fd, content):
-        nonlocal writes
-        writes += 1
-        if writes == 2:
-            original_write(fd, content[:13])
-            raise OSError("partial append")
-        return original_write(fd, content)
+        original_write(fd, content[:18])
+        raise OSError("partial append")
 
     def failing_truncate(*args):
         raise OSError("cannot recover")
@@ -358,45 +354,12 @@ def test_failed_recovery_poisoned_worker_and_restart_detects_suffix(configured_e
         writeback._recovery_failures.clear()  # simulate a fresh worker
         monkeypatch.setattr(os, "write", original_write)
         monkeypatch.setattr(os, "ftruncate", original_truncate)
-        with pytest.raises(RuntimeError, match="operator recovery"):
+        with pytest.raises(RuntimeError, match="parse errors"):
             writeback.validate_and_commit([transaction()])
         assert manual.read_bytes() == damaged
     finally:
         writeback._recovery_failures.clear()
 
-
-@pytest.mark.parametrize("suffix", [
-    b";", b"; cash", b"; cashier-writeback", b"; cashier-writeback-v1",
-    b"; cashier-writeback-v1 beg",
-    b"; cashier-writeback-v1 begin " + b"0" * 64,
-    b"; cashier-writeback-v1 begin " + b"0" * 64 + b"\n2026-05-28",
-])
-def test_restart_incomplete_suffix_is_preserved_not_discarded(configured_env, suffix):
-    manual = Path(configured_env)
-    manual.write_bytes(suffix)
-    with pytest.raises(RuntimeError, match="operator recovery"):
-        writeback.validate_and_commit([transaction()])
-    assert manual.read_bytes() == suffix
-
-
-def test_restart_rejects_syntactically_valid_incomplete_batch(configured_env):
-    manual = Path(configured_env)
-    complete = writeback._append_entries_to_source("", writeback._parse_transaction(transaction())[0]).encode()
-    truncated = complete[:complete.index(b"; cashier-writeback-v1 end ")]
-    manual.write_bytes(truncated)
-    with pytest.raises(RuntimeError, match="Incomplete writeback batch"):
-        writeback.validate_and_commit([transaction("next")])
-    assert manual.read_bytes() == truncated
-
-
-def test_restart_rejects_batch_checksum_mismatch(configured_env):
-    writeback.validate_and_commit([transaction()])
-    manual = Path(configured_env)
-    damaged = manual.read_bytes().replace(b"Security", b"Tampered")
-    manual.write_bytes(damaged)
-    with pytest.raises(RuntimeError, match="Corrupt writeback batch"):
-        writeback.validate_and_commit([transaction("next")])
-    assert manual.read_bytes() == damaged
 
 
 def test_flock_unavailable_is_configuration_failure(configured_env, monkeypatch):
@@ -474,27 +437,24 @@ def test_multiprocess_flock_spans_read_dedupe_validation_and_append(configured_e
         assert "7.00 USD" not in content
     _, errors, _ = loader.load_file(str(Path(configured_env).with_name("main.bean")))
     assert not errors
-    writeback._check_writeback_integrity(Path(configured_env).read_bytes())
 
 
 def _interrupted_writer(ready):
     original_write_all = writeback._write_all
-    calls = 0
 
-    def interrupt_after_durable_intent(fd, content):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            ready.set()
-            # The test terminates this process after begin+fsync, before payload.
-            multiprocessing.Event().wait(30)
-        original_write_all(fd, content)
+    def pause_after_first_transaction(fd, content):
+        boundary = content.index(b"\n\n2026-05-28") + 1
+        original_write_all(fd, content[:boundary])
+        os.fsync(fd)
+        ready.set()
+        if not multiprocessing.Event().wait(30):
+            raise RuntimeError("test timed out waiting for worker termination")
 
-    writeback._write_all = interrupt_after_durable_intent
-    writeback.validate_and_commit([transaction()])
+    writeback._write_all = pause_after_first_transaction
+    writeback.validate_and_commit([transaction(), transaction("security-2")])
 
 
-def test_process_interruption_requires_operator_recovery(configured_env):
+def test_retry_after_process_interruption_with_valid_prefix(configured_env):
     ctx = multiprocessing.get_context("spawn")
     ready = ctx.Event()
     worker = ctx.Process(target=_interrupted_writer, args=(ready,))
@@ -504,12 +464,19 @@ def test_process_interruption_requires_operator_recovery(configured_env):
         worker.terminate()
         worker.join(10)
         assert worker.exitcode is not None and worker.exitcode != 0
-        damaged = Path(configured_env).read_bytes()
-        assert damaged.startswith(b"; cashier-writeback-v1 begin ")
-        assert b"cashier_id:" not in damaged
-        with pytest.raises(RuntimeError, match="Incomplete writeback batch"):
-            writeback.validate_and_commit([transaction("retry")])
-        assert Path(configured_env).read_bytes() == damaged
+        manual = Path(configured_env)
+        prefix = manual.read_bytes()
+        assert b'cashier_id: "security-1"' in prefix
+        assert b'cashier_id: "security-2"' not in prefix
+
+        result, wrote = writeback.validate_and_commit([transaction(), transaction("security-2")])
+        assert wrote
+        assert result == {"synchronized": ["security-1", "security-2"], "rejected": []}
+        content = manual.read_bytes()
+        assert content.startswith(prefix)
+        assert content.count(b'cashier_id: "security-1"') == 1
+        assert content.count(b'cashier_id: "security-2"') == 1
+        assert not any(line.startswith(b";") for line in content.splitlines())
     finally:
         if worker.is_alive():
             worker.terminate()
@@ -530,7 +497,9 @@ def test_short_writes_complete_on_same_descriptor(configured_env, monkeypatch):
     assert wrote
     assert result == {"synchronized": ["security-1"], "rejected": []}
     assert calls > 10
-    writeback._check_writeback_integrity(Path(configured_env).read_bytes())
+    entries, errors, _ = parser.parse_string(Path(configured_env).read_bytes())
+    assert not errors
+    assert len(entries) == 1
 
 
 def test_manual_file_cannot_be_the_ledger_root(configured_env, monkeypatch):
@@ -541,13 +510,20 @@ def test_manual_file_cannot_be_the_ledger_root(configured_env, monkeypatch):
     assert Path(os.environ["BEANCOUNT_FILE"]).read_bytes() == before
 
 
-def test_batch_markers_are_comments_with_exact_payload_digest(configured_env):
-    writeback.validate_and_commit([transaction()])
-    content = Path(configured_env).read_bytes()
-    begin, body = content.split(b"\n", 1)
-    body, end = body.split(b"; cashier-writeback-v1 end ")
-    assert begin.endswith(hashlib.sha256(body).hexdigest().encode())
-    assert end.strip() == hashlib.sha256(body).hexdigest().encode()
+def test_new_batch_appends_only_transactions_and_preserves_existing_bytes(configured_env):
+    manual = Path(configured_env)
+    previous = "; Existing comment, café".encode()
+    manual.write_bytes(previous)
+    inputs = [transaction(), "; Ignore input comment\n" + transaction("security-2")]
+    result, wrote = writeback.validate_and_commit(inputs)
+    assert wrote
+    assert result == {"synchronized": ["security-1", "security-2"], "rejected": []}
+    expected = "\n\n".join(
+        writeback._normalize_entry(writeback._parse_transaction(text)[0][0]).rstrip("\n") for text in inputs
+    )
+    assert manual.read_bytes() == previous + b"\n\n" + expected.encode() + b"\n"
+    assert writeback.validate_and_commit(inputs) == (result, False)
+
 
 
 @pytest.mark.parametrize("posting_metadata", [False, True])
@@ -591,10 +567,6 @@ def test_multiline_strings_cannot_be_mistaken_for_control_directives(configured_
     assert not wrote
     assert retry == result
 
-
-def test_recovery_marker_in_multiline_string_cannot_poison_committed_file(configured_env):
-    text = transaction(narration="first line\n; cashier-writeback-v1 begin " + "0" * 64 + "\nlast line")
-    assert_rejected(configured_env, text)
 
 
 @pytest.mark.parametrize("kind", ["absolute", "traversal", "symlink", "symlink_directory"])
@@ -669,15 +641,11 @@ def test_one_capture_and_materialization_per_batch_preserves_plugin_partial_succ
 def test_unverified_external_bytes_are_never_truncated_during_rollback(configured_env, monkeypatch):
     manual = Path(configured_env)
     original_write = os.write
-    writes = 0
 
     def append_external_bytes_and_fail(fd, content):
-        nonlocal writes
-        writes += 1
-        if writes == 2:
-            original_write(fd, b"; uncooperative external append\n")
-            raise OSError("write failed after external edit")
-        return original_write(fd, content)
+        original_write(fd, content[:18])
+        original_write(fd, b"; uncooperative external append\n")
+        raise OSError("write failed after external edit")
 
     monkeypatch.setattr(os, "write", append_external_bytes_and_fail)
     try:
@@ -891,14 +859,14 @@ def test_unsafe_temp_storage_never_probes_or_creates_in_ledger(configured_env, m
 
 
 @pytest.mark.parametrize("headroom, accepted", [(0, True), (-1, False)])
-def test_candidate_file_limit_includes_checksum_markers(configured_env, monkeypatch, headroom, accepted):
+def test_candidate_file_limit_includes_transaction_separator(configured_env, monkeypatch, headroom, accepted):
     import cashier_snapshot.workspace as workspace_module
 
     manual = Path(configured_env)
     limit = 2048
     text = transaction()
     rendered = writeback._append_entries_to_source("", writeback._parse_transaction(text)[0]).encode()
-    # A nonempty prefix adds one separator newline in addition to the markers.
+    # A nonempty prefix adds one separator newline.
     prefix_size = limit - len(rendered) - 1 - headroom
     previous = b";" + b"p" * (prefix_size - 2) + b"\n"
     manual.write_bytes(previous)
@@ -939,9 +907,9 @@ def test_final_candidate_budget_is_checked_after_per_entry_validation(configured
 
     monkeypatch.setattr(writeback, "_validation_error_texts_for_entry", lambda *args: [])
     manual = Path(configured_env)
-    # Baseline capture fits; the candidate plus both checksum comments does not.
+    # Baseline capture fits; the candidate with the appended transaction does not.
     monkeypatch.setattr(workspace_module, "MAX_FILE_BYTES", 1024)
-    previous = b";" + b"p" * 899 + b"\n"
+    previous = b";" + b"p" * 999 + b"\n"
     manual.write_bytes(previous)
     result, wrote = writeback.validate_and_commit([transaction()])
     assert not wrote

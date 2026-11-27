@@ -52,11 +52,6 @@ For read-only sync, leave `BEANCOUNT_MANUAL_TRANSACTIONS_FILE` unset and keep th
 
 The server only appends to that file; it never needs a writable directory under `/workspace`. The file must not be the ledger root. All writers must honor the same exclusive file lock. Before enabling writes, correct invalid or duplicate `cashier_id` values in existing manual transactions; the server refuses to write rather than rewriting IDs. See the [writeback API](api.md#writeback-guarantees-beyond-json-schema) for accepted IDs and transaction formats.
 
-## Recover interrupted writeback
-
-Do not edit or remove the reserved `; cashier-writeback-v1` checksum comments. An incomplete or altered batch is detected on the next write, and further writes are refused. The append protocol is crash-conscious, not crash-atomic.
-
-Stop every writer, preserve a copy of the damaged file outside the ledger tree, restore a verified known-good manual file, and validate the full ledger before restarting. Do not truncate an unverified suffix or remove a marker just to clear an error. If you restored the file by replacing it on the host, recreate the container so its file bind mount picks up the replacement.
 
 ## Upgrade an older deployment
 
